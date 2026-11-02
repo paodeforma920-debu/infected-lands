@@ -1,8 +1,5 @@
---======================================================
--- ESP + Aimbot Script v3
--- Players / Corpses / Vehicles / Loot Vehicles / Items
--- Aimbot (Players, Wall Check)
---======================================================
+-- VERSION - shown in the unload confirmation message.
+local VERSION = "1.0.0"
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -12,6 +9,30 @@ local CoreGui = game:GetService("CoreGui")
 
 local LocalPlayer = Players.LocalPlayer
 local Camera = workspace.CurrentCamera
+
+-- Platform detection
+local isPC = UserInputService.KeyboardEnabled and not UserInputService.TouchEnabled
+local guiVisible = false  -- forward declaration (used by floating buttons before main assignment)
+
+-- Load StudsToMeters conversion factor from SquadConfig (same as the game uses)
+local StudsToMeters = 1  -- fallback if SquadConfig fails to load
+pcall(function()
+    local cfg = require(game:GetService("ReplicatedStorage").Shared.SquadConfig)
+    if cfg and type(cfg.StudsToMeters) == "number" then
+        StudsToMeters = cfg.StudsToMeters
+    end
+end)
+
+--======================================================
+-- Forward declarations for cleanup tracking
+-- These are defined later but used by code above their definition site,
+-- so we declare them as locals here and assign the real function later.
+--======================================================
+local CleanupRegistry
+local trackConnection
+local trackRenderStep
+local trackGui
+local connectRenderStepped
 
 --======================================================
 -- Config
@@ -24,7 +45,7 @@ local Config = {
     Items    = { Enabled=false, Name=true, Distance=true, Box=true, Tracer=false, Color=Color3.fromRGB(180,255,120),  MaxDistance=600  },
     Aimbot = {
         Enabled=false, WallCheck=true, SquadCheck=true,
-        TargetPart="HumanoidRootPart",
+        TargetPart="Head",
         AimKey=Enum.KeyCode.E,
         UseMouseInput=true,
         MouseButton=Enum.UserInputType.MouseButton2,
@@ -135,6 +156,42 @@ do
             task.wait(5)
         end
     end)
+end
+
+--======================================================
+-- Cleanup registry (for unload)
+-- MUST be defined here (before any code that uses trackConnection/trackGui)
+-- because top-level code runs in source order at load time.
+--======================================================
+CleanupRegistry = {
+    connections = {},       -- list of RBXScriptConnection
+    renderStepBinds = {},   -- list of names passed to BindToRenderStep
+    guis = {},              -- list of ScreenGui instances to destroy
+    loaded = true,          -- set false after unload to prevent re-connection
+}
+
+trackConnection = function(conn)
+    if conn and CleanupRegistry.loaded then
+        table.insert(CleanupRegistry.connections, conn)
+    end
+    return conn
+end
+
+trackRenderStep = function(name)
+    if CleanupRegistry.loaded then
+        table.insert(CleanupRegistry.renderStepBinds, name)
+    end
+end
+
+trackGui = function(gui)
+    if gui and CleanupRegistry.loaded then
+        table.insert(CleanupRegistry.guis, gui)
+    end
+    return gui
+end
+
+connectRenderStepped = function(fn)
+    return trackConnection(RunService.RenderStepped:Connect(fn))
 end
 
 --======================================================
@@ -341,7 +398,8 @@ local function renderEntry(entry, model, cfg, label, health)
     else entry.Name.Visible=false end
 
     if cfg.Distance then
-        entry.Dist.Text = string.format("[%dm]", math.floor(dist))
+        local meters = math.max(0, math.floor(dist * StudsToMeters + 0.5))
+        entry.Dist.Text = string.format("[%dm]", meters)
         entry.Dist.Position = Vector2.new(center.X, center.Y + height/2 + 2)
         entry.Dist.Color = Color3.fromRGB(255,255,255)
         entry.Dist.Visible = true
@@ -522,13 +580,13 @@ local function updateItems()
     end
 end
 
-RunService.RenderStepped:Connect(function()
+trackConnection(RunService.RenderStepped:Connect(function()
     if Config.Players.Enabled  then pcall(updatePlayers)      else disableAll(Entries.Players)  end
     if Config.Corpses.Enabled  then pcall(updateCorpses)      else disableAll(Entries.Corpses)  end
     if Config.Vehicles.Enabled then pcall(updateVehicles)     else disableAll(Entries.Vehicles) end
     if Config.LootVeh.Enabled  then pcall(updateLootVehicles) else disableAll(Entries.LootVeh)  end
     if Config.Items.Enabled    then pcall(updateItems)        else disableAll(Entries.Items)    end
-end)
+end))
 
 --======================================================
 -- Aimbot
@@ -662,10 +720,11 @@ local aimbotBound = false
 pcall(function()
     RunService:BindToRenderStep("AimbotStep", Enum.RenderPriority.Camera.Value + 1, aimbotStep)
     aimbotBound = true
+    trackRenderStep("AimbotStep")
 end)
 if not aimbotBound then
     -- Fallback: regular RenderStepped
-    RunService.RenderStepped:Connect(aimbotStep)
+    trackConnection(RunService.RenderStepped:Connect(aimbotStep))
 end
 
 --======================================================
@@ -681,6 +740,7 @@ local THEME = {
         accentDark        = Color3.fromRGB(51, 62, 49),     -- #333E31
         tabActive         = Color3.fromRGB(51, 62, 49),
         tabInactive       = Color3.fromRGB(27, 31, 35),
+        tabIdle           = Color3.fromRGB(27, 31, 35),  -- alias for tabInactive
         text              = Color3.fromRGB(239, 242, 243),
         muted             = Color3.fromRGB(158, 168, 171),
         red               = Color3.fromRGB(255, 65, 65),
@@ -708,14 +768,20 @@ ScreenGui.ResetOnSpawn = false
 ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 ScreenGui.IgnoreGuiInset = true
 ScreenGui.Parent = getGuiParent()
+trackGui(ScreenGui)
 
 --======================================================
 -- Main window
 --======================================================
 local Main = Instance.new("Frame")
 Main.Name = "Main"
-Main.Size = UDim2.new(0, 1200, 0, 500)
-Main.Position = UDim2.new(0.5, -600, 0.5, -250)
+if isPC then
+    Main.Size = UDim2.new(0, 1200, 0, 500)
+    Main.Position = UDim2.new(0.5, -600, 0.5, -250)
+else
+    Main.Size = UDim2.new(0.95, 0, 0.85, 0)
+    Main.Position = UDim2.new(0.025, 0, 0.075, 0)
+end
 Main.BackgroundColor3 = THEME.palette.backgroundGray
 Main.BackgroundTransparency = 0.35
 Main.BorderSizePixel = 0
@@ -739,20 +805,20 @@ local dragging_main = false
 local dragStart, startPos
 local function setupDrag(frame)
     frame.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
             dragging_main = true
             dragStart = input.Position
             startPos = Main.Position
         end
     end)
     frame.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
             dragging_main = false
         end
     end)
 end
 UserInputService.InputChanged:Connect(function(input)
-    if dragging_main and input.UserInputType == Enum.UserInputType.MouseMovement then
+    if dragging_main and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
         local delta = input.Position - dragStart
         Main.Position = UDim2.new(
             startPos.X.Scale, startPos.X.Offset + delta.X,
@@ -816,9 +882,9 @@ local function updateHeaderStats()
     end
     HeaderTitle.Text = string.format("%s  |  %d FPS  |  %d ms", LocalPlayer.Name, math.floor(fpsSmoothed), math.floor(ping))
 end
-fpsConn = RunService.RenderStepped:Connect(function()
+fpsConn = trackConnection(RunService.RenderStepped:Connect(function()
     pcall(updateHeaderStats)
-end)
+end))
 
 local CloseBtn = Instance.new("TextButton")
 CloseBtn.Name = "Close"
@@ -1265,7 +1331,7 @@ local function makeSlider(parent, text, min, max, value, callback, isFloat)
         setFromX(mouseLoc.X)
     end
     track.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
             beginDrag(input.Position.X)
         end
     end)
@@ -1273,15 +1339,15 @@ local function makeSlider(parent, text, min, max, value, callback, isFloat)
         beginFromMouse()
     end)
     knob.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
             beginDrag(input.Position.X)
         end
     end)
     UserInputService.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then dragging = false end
     end)
     UserInputService.InputChanged:Connect(function(input)
-        if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
             setFromX(input.Position.X)
         end
     end)
@@ -2317,19 +2383,19 @@ local function buildMinimap()
     local dragging_mini = false
     local miniStart, miniStartPos
     MinimapRoot.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
             dragging_mini = true
             miniStart = input.Position
             miniStartPos = MinimapRoot.Position
         end
     end)
     MinimapRoot.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
             dragging_mini = false
         end
     end)
     UserInputService.InputChanged:Connect(function(input)
-        if dragging_mini and input.UserInputType == Enum.UserInputType.MouseMovement then
+        if dragging_mini and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
             local delta = input.Position - miniStart
             MinimapRoot.Position = UDim2.new(
                 miniStartPos.X.Scale, miniStartPos.X.Offset + delta.X,
@@ -3100,203 +3166,10 @@ makeButton(ConfigScroll, "Delete", function()
     end, { yesText = "Delete", noText = "Cancel" })
 end, true)
 
-addSection(ConfigScroll, "AUTOEXECUTE", THEME.palette.primaryGreen)
-
--- Autoexecute uses TWO mechanisms working together:
---
--- 1) queue_on_teleport (executor function, UNC standard):
---    When the script detects the player is about to teleport (Rejoin or Serverhop),
---    it queues a loader to run in the NEW server. The loader reads bagabo/main.lua
---    and re-executes the whole script. This is what makes the script persist
---    across server hops WITHOUT needing to manually re-execute.
---
--- 2) Executor's AutoExec folder (manual, one-time setup):
---    The user copies bagabo/loader.lua to their executor's AutoExec folder so the
---    script also runs when they FIRST join a game (before any teleport happens).
---    This handles the very first execution.
-
-local autoexecLoaderPath = CONFIG_FOLDER .. "/loader.lua"
-local autoexecFlagPath   = CONFIG_FOLDER .. "/autoexec.flag"
-local autoexecUrlPath    = CONFIG_FOLDER .. "/script_url.txt"
-
--- Get the queue_on_teleport function from the executor (UNC standard).
--- Synapse exposes it as syn.queue_on_teleport; most others expose it globally.
-local function getQueueOnTeleport()
-    if type(queue_on_teleport) == "function" then return queue_on_teleport end
-    if syn and type(syn.queue_on_teleport) == "function" then return syn.queue_on_teleport end
-    if fluxus and type(fluxus.queue_on_teleport) == "function" then return fluxus.queue_on_teleport end
-    return nil
-end
-
-local queueOnTeleport = getQueueOnTeleport()
-
--- Build the queued code that runs in the NEW server after teleport.
--- Pattern from Infinite Yield's keepiy command:
---   queueteleport("loadstring(game:HttpGet('URL'))()")
--- We do the same: wait for game to load, then loadstring+HttpGet the URL.
-local function buildQueuedCode(scriptUrl)
-    if not scriptUrl or scriptUrl == "" then return nil end
-    -- Escape single quotes in the URL to avoid breaking the loadstring string
-    local safeUrl = scriptUrl:gsub("'", "\\'")
-    return [=[
--- bagabo loader (queued by ESP+Aimbot on teleport)
-repeat task.wait() until game:IsLoaded()
-task.wait(2)
-pcall(function()
-    loadstring(game:HttpGet(']=] .. safeUrl .. [=['))()
-end)
-]=]
-end
-
--- Read the script URL from the saved file (or empty if not set)
-local function getScriptUrl()
-    local content = readFile(autoexecUrlPath)
-    if not content then return "" end
-    -- Trim whitespace
-    return (content:gsub("^%s+", ""):gsub("%s+$", ""))
-end
-
-local currentScriptUrl = getScriptUrl()
-local AutoexecEnabled = fileExists(autoexecFlagPath) and currentScriptUrl ~= ""
-
--- Hook the OnTeleport event ONCE. Pattern matches Infinite Yield:
---   Players.LocalPlayer.OnTeleport:Connect(function(State)
---     if KeepInfYield and queueteleport then
---       queueteleport("loadstring(game:HttpGet('URL'))()")
---     end
---   end)
-local teleportCheck = false
-if queueOnTeleport then
-    pcall(function()
-        LocalPlayer.OnTeleport:Connect(function(state)
-            -- Only queue once per session, only when autoexecute is enabled
-            if (not teleportCheck) and fileExists(autoexecFlagPath) then
-                local url = getScriptUrl()
-                if url and url ~= "" then
-                    teleportCheck = true
-                    local code = buildQueuedCode(url)
-                    if code then
-                        pcall(function() queueOnTeleport(code) end)
-                    end
-                end
-            end
-        end)
-    end)
-end
-
-makeToggle(ConfigScroll, "Autoexecute", AutoexecEnabled, function(v)
-    ensureConfigFolder()
-    if v then
-        local url = getScriptUrl()
-        if url == "" then
-            -- Need a URL first - prompt the user
-            task.delay(0.05, function()
-                showPopup("Set Script URL",
-                    "Autoexecute needs a URL where your script is hosted.\n\n" ..
-                    "Examples:\n" ..
-                    "  - https://raw.githubusercontent.com/USER/REPO/main/ESP.lua\n" ..
-                    "  - https://pastebin.com/raw/XXXXX\n\n" ..
-                    "Paste the URL below (use the 'Set Script URL' button to change it later).",
-                    function(input)
-                        local u = (input or ""):gsub("^%s+", ""):gsub("%s+$", "")
-                        if #u < 10 or not u:find("http") then
-                            showPopup("Invalid URL", "That doesn't look like a valid URL. Autoexecute disabled.", nil,
-                                { yesText = "OK", noText = "Close" })
-                            return
-                        end
-                        writeFile(autoexecUrlPath, u)
-                        writeFile(autoexecFlagPath, "1")
-                        currentScriptUrl = u
-                        -- Write a small loader file for the user's AutoExec folder (one-time setup)
-                        writeFile(autoexecLoaderPath, buildQueuedCode(u) or "")
-                        writeFile(CONFIG_FOLDER .. "/AUTOEXEC_README.txt",
-                            "Autoexecute setup:\n\n" ..
-                            "1. Host your ESP+Aimbot script at the URL you set:\n" ..
-                            "   " .. u .. "\n\n" ..
-                            "2. (Optional) Copy bagabo/loader.lua to your executor's\n" ..
-                            "   AutoExec folder so the script also runs on FIRST join\n" ..
-                            "   (before any teleport happens).\n\n" ..
-                            "3. When you Rejoin/Serverhop, queue_on_teleport will\n" ..
-                            "   re-download and run the script in the new server\n" ..
-                            "   automatically.\n\n" ..
-                            "Note: autoload config also loads automatically when the script starts."
-                        )
-                        showPopup("Autoexecute ON",
-                            "Script URL saved.\n\n" ..
-                            "The script will re-download from this URL after every server hop.\n\n" ..
-                            "To change the URL later, use the 'Set Script URL' button.",
-                            nil, { yesText = "OK", noText = "Close" })
-                    end, { showInput = true, yesText = "Save", noText = "Cancel", defaultInput = "" })
-            end)
-            -- Don't enable yet - the user needs to set the URL first
-            -- (the popup will set the flag if they enter a valid URL)
-            return
-        end
-        -- URL already set, just enable
-        writeFile(autoexecFlagPath, "1")
-        writeFile(autoexecLoaderPath, buildQueuedCode(url) or "")
-    else
-        deleteFile(autoexecFlagPath)
-        -- Keep the URL file so user doesn't have to re-enter it
-    end
-end)
-
--- "Set Script URL" button: lets the user change the URL where their script is hosted.
-makeButton(ConfigScroll, "Set Script URL", function()
-    local currentUrl = getScriptUrl()
-    showPopup("Set Script URL",
-        "Paste the URL where your ESP+Aimbot script is hosted.\n\n" ..
-        "Examples:\n" ..
-        "  - https://raw.githubusercontent.com/USER/REPO/main/ESP.lua\n" ..
-        "  - https://pastebin.com/raw/XXXXX\n\n" ..
-        "Current URL:\n" .. (currentUrl == "" and "(none)" or currentUrl),
-        function(input)
-            local u = (input or ""):gsub("^%s+", ""):gsub("%s+$", "")
-            if #u < 10 or not u:find("http") then
-                showPopup("Invalid URL", "That doesn't look like a valid URL.", nil,
-                    { yesText = "OK", noText = "Close" })
-                return
-            end
-            ensureConfigFolder()
-            writeFile(autoexecUrlPath, u)
-            currentScriptUrl = u
-            -- Update the loader file if autoexecute is enabled
-            if fileExists(autoexecFlagPath) then
-                writeFile(autoexecLoaderPath, buildQueuedCode(u) or "")
-            end
-            showPopup("URL Saved", "Script URL updated to:\n" .. u, nil,
-                { yesText = "OK", noText = "Close" })
-        end, { showInput = true, yesText = "Save", noText = "Cancel", defaultInput = currentUrl })
-end)
-
--- "Test URL" button: downloads the script from the URL and runs it (so the user
--- can verify the URL works without teleporting).
-makeButton(ConfigScroll, "Test URL", function()
-    local url = getScriptUrl()
-    if url == "" then
-        showPopup("No URL", "Set a script URL first using 'Set Script URL'.", nil,
-            { yesText = "OK", noText = "Close" })
-        return
-    end
-    showPopup("Test URL",
-        "Download and run the script from:\n" .. url .. "\n\nThis will execute the script AGAIN (over the current one). Continue?",
-        function()
-            task.spawn(function()
-                local ok, err = pcall(function()
-                    loadstring(game:HttpGet(url))()
-                end)
-                if not ok then
-                    showPopup("Error", "Failed to load script from URL:\n" .. tostring(err), nil,
-                        { yesText = "OK", noText = "Close" })
-                end
-            end)
-        end, { yesText = "Run", noText = "Cancel" })
-end)
-
 local configHint = Instance.new("TextLabel")
 configHint.Size = UDim2.new(1, 0, 0, 50)
 configHint.BackgroundTransparency = 1
-configHint.Text = "Configs in: workspace/bagabo/\n(* = autoload) | Autoexecute: loadstring(HttpGet(URL)) on teleport"
+configHint.Text = "Configs in: workspace/bagabo/\n(* = autoload)"
 configHint.TextColor3 = THEME.palette.muted
 configHint.FontFace = THEME.font.regular
 configHint.TextSize = 11
@@ -3332,9 +3205,96 @@ end)
 
 
 --======================================================
+-- Floating buttons (mobile only)
+-- Two always-visible buttons: one toggles the GUI, one toggles Aimbot
+--======================================================
+if not isPC then
+    local FloatBtnsGui = Instance.new("ScreenGui")
+    FloatBtnsGui.Name = "ESPFloatBtns"
+    FloatBtnsGui.ResetOnSpawn = false
+    FloatBtnsGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    FloatBtnsGui.IgnoreGuiInset = true
+    FloatBtnsGui.DisplayOrder = 90
+    FloatBtnsGui.Parent = getGuiParent()
+    trackGui(FloatBtnsGui)
+
+    local btnSize = UDim2.fromOffset(56, 56)
+    local btnFont = 16
+    local btnRadius = 8
+
+    -- GUI toggle button (top-right)
+    local GuiToggleBtn = Instance.new("TextButton")
+    GuiToggleBtn.Name = "GuiToggle"
+    GuiToggleBtn.Size = btnSize
+    GuiToggleBtn.Position = UDim2.new(1, -64, 0, 8)
+    GuiToggleBtn.BackgroundColor3 = THEME.palette.backgroundGray
+    GuiToggleBtn.BackgroundTransparency = 0.2
+    GuiToggleBtn.BorderSizePixel = 0
+    GuiToggleBtn.Text = "ESP"
+    GuiToggleBtn.Font = Enum.Font.GothamBold
+    GuiToggleBtn.TextSize = btnFont
+    GuiToggleBtn.TextColor3 = THEME.palette.primaryGray
+    GuiToggleBtn.Parent = FloatBtnsGui
+    local gtCorner = Instance.new("UICorner")
+    gtCorner.CornerRadius = UDim.new(0, btnRadius)
+    gtCorner.Parent = GuiToggleBtn
+    local gtStroke = Instance.new("UIStroke")
+    gtStroke.Color = THEME.palette.primaryGray
+    gtStroke.Thickness = 1
+    gtStroke.Transparency = 0.4
+    gtStroke.Parent = GuiToggleBtn
+
+    -- Aimbot toggle button (below GUI toggle)
+    local AimToggleBtn = Instance.new("TextButton")
+    AimToggleBtn.Name = "AimToggle"
+    AimToggleBtn.Size = btnSize
+    AimToggleBtn.Position = UDim2.new(1, -64, 0, 72)
+    AimToggleBtn.BackgroundColor3 = THEME.palette.backgroundGray
+    AimToggleBtn.BackgroundTransparency = 0.2
+    AimToggleBtn.BorderSizePixel = 0
+    AimToggleBtn.Text = "AIM"
+    AimToggleBtn.Font = Enum.Font.GothamBold
+    AimToggleBtn.TextSize = btnFont
+    AimToggleBtn.TextColor3 = THEME.palette.tabInactive
+    AimToggleBtn.Parent = FloatBtnsGui
+    local atCorner = Instance.new("UICorner")
+    atCorner.CornerRadius = UDim.new(0, btnRadius)
+    atCorner.Parent = AimToggleBtn
+    local atStroke = Instance.new("UIStroke")
+    atStroke.Color = THEME.palette.primaryGray
+    atStroke.Thickness = 1
+    atStroke.Transparency = 0.4
+    atStroke.Parent = AimToggleBtn
+
+    local function updateAimBtn()
+        if Config.Aimbot.Enabled then
+            AimToggleBtn.TextColor3 = THEME.palette.primaryGreen
+            atStroke.Color = THEME.palette.primaryGreen
+            atStroke.Transparency = 0
+        else
+            AimToggleBtn.TextColor3 = THEME.palette.tabInactive
+            atStroke.Color = THEME.palette.primaryGray
+            atStroke.Transparency = 0.4
+        end
+    end
+
+    GuiToggleBtn.MouseButton1Click:Connect(function()
+        guiVisible = not guiVisible
+        Main.Visible = guiVisible
+    end)
+
+    AimToggleBtn.MouseButton1Click:Connect(function()
+        Config.Aimbot.Enabled = not Config.Aimbot.Enabled
+        updateAimBtn()
+    end)
+
+    updateAimBtn()
+end
+
+--======================================================
 -- Mouse / Input
 --======================================================
-local guiVisible = false
+guiVisible = false  -- assign to forward-declared variable
 local function setMouseFree(state)
     pcall(function()
         if UserInputService.MouseBehavior then
@@ -3354,7 +3314,7 @@ end
 
 -- Force mouse free every frame while menu is open
 -- (games often re-lock the mouse each frame)
-RunService.RenderStepped:Connect(function()
+trackConnection(RunService.RenderStepped:Connect(function()
     if guiVisible then
         pcall(function()
             if UserInputService.MouseBehavior then
@@ -3365,7 +3325,7 @@ RunService.RenderStepped:Connect(function()
             end
         end)
     end
-end)
+end))
 
 UserInputService.InputBegan:Connect(function(input)
     if input.KeyCode == Enum.KeyCode.Insert then
@@ -3379,3 +3339,75 @@ Main:GetPropertyChangedSignal("Visible"):Connect(function()
         setMouseFree(false)
     end
 end)
+
+
+--======================================================
+-- Unload
+--======================================================
+
+-- UNLOAD: tears down everything cleanly so the script can be re-executed
+-- without leftover connections or drawings.
+local function unloadScript()
+    -- 1. Prevent new connections from being tracked
+    CleanupRegistry.loaded = false
+
+    -- 2. Disconnect all tracked RenderStepped/Heartbeat/InputBegan connections
+    for _, conn in ipairs(CleanupRegistry.connections) do
+        pcall(function() conn:Disconnect() end)
+    end
+    CleanupRegistry.connections = {}
+
+    -- 3. Unbind all tracked BindToRenderStep names
+    for _, name in ipairs(CleanupRegistry.renderStepBinds) do
+        pcall(function() RunService:UnbindFromRenderStep(name) end)
+    end
+    CleanupRegistry.renderStepBinds = {}
+
+    -- 4. Disable features that modify the game world (restore original state)
+    pcall(function() setFullbright(false) end)
+    pcall(function() setNoFog(false) end)
+    pcall(function() setNoRain(false) end)
+    pcall(function()
+        if norainConnection then norainConnection:Disconnect() norainConnection = nil end
+    end)
+    pcall(function() setRadar(false) end)
+    pcall(function() setMinimap(false) end)
+
+    -- 5. Clear all ESP drawings (boxes, names, tracers, skeletons)
+    for _, tbl in pairs(Entries) do
+        pcall(function() disableAll(tbl) end)
+    end
+    -- 6. Clear the aimbot FOV circle
+    pcall(function() AimbotFOV:Remove() end)
+    -- 7. Clear radar dots
+    pcall(function() clearRadarDots() end)
+    -- 8. Clear minimap dots
+    pcall(function() clearMiniDots() end)
+
+    -- 9. Restore the mouse
+    pcall(function()
+        UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+        UserInputService.MouseIconEnabled = true
+    end)
+
+    -- 10. Destroy all tracked GUIs (ScreenGui, MinimapGui)
+    for _, gui in ipairs(CleanupRegistry.guis) do
+        pcall(function() gui:Destroy() end)
+    end
+    CleanupRegistry.guis = {}
+
+    print(("[ESP+Aimbot] Unloaded v%s"):format(VERSION))
+end
+
+--======================================================
+-- Add Unload button to the Config column
+--======================================================
+addSection(ConfigScroll, "SCRIPT CONTROL", THEME.palette.primaryGreen)
+
+makeButton(ConfigScroll, "Unload Script", function()
+    showPopup("Unload Script",
+        "Unload the script completely?\nAll ESP, aimbot, and GUI will be removed.\nYou'll need to re-execute the script to use it again.",
+        function()
+            pcall(unloadScript)
+        end, { yesText = "Unload", noText = "Cancel" })
+end, true)
