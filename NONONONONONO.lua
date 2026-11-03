@@ -45,7 +45,7 @@ local Config = {
     Items    = { Enabled=false, Name=true, Distance=true, Box=true, Tracer=false, Color=Color3.fromRGB(180,255,120),  MaxDistance=600  },
     Aimbot = {
         Enabled=false, WallCheck=true, SquadCheck=true,
-        TargetPart="Head",
+        TargetPart="HumanoidRootPart",
         AimKey=Enum.KeyCode.E,
         UseMouseInput=true,
         MouseButton=Enum.UserInputType.MouseButton2,
@@ -2383,7 +2383,7 @@ local function buildMinimap()
     local dragging_mini = false
     local miniStart, miniStartPos
     MinimapRoot.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        if (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) and guiVisible then
             dragging_mini = true
             miniStart = input.Position
             miniStartPos = MinimapRoot.Position
@@ -2395,7 +2395,7 @@ local function buildMinimap()
         end
     end)
     UserInputService.InputChanged:Connect(function(input)
-        if dragging_mini and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+        if dragging_mini and guiVisible and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
             local delta = input.Position - miniStart
             MinimapRoot.Position = UDim2.new(
                 miniStartPos.X.Scale, miniStartPos.X.Offset + delta.X,
@@ -3206,7 +3206,9 @@ end)
 
 --======================================================
 -- Floating buttons (mobile only)
--- Two always-visible buttons: one toggles the GUI, one toggles Aimbot
+-- ESP button: always visible (toggles menu)
+-- AIM button: only visible when aimbot is enabled
+-- Both hide when inventory is open
 --======================================================
 if not isPC then
     local FloatBtnsGui = Instance.new("ScreenGui")
@@ -3244,7 +3246,7 @@ if not isPC then
     gtStroke.Transparency = 0.4
     gtStroke.Parent = GuiToggleBtn
 
-    -- Aimbot toggle button (below GUI toggle)
+    -- Aimbot toggle button (below GUI toggle) - hidden by default, only shows when aimbot is ON
     local AimToggleBtn = Instance.new("TextButton")
     AimToggleBtn.Name = "AimToggle"
     AimToggleBtn.Size = btnSize
@@ -3255,28 +3257,70 @@ if not isPC then
     AimToggleBtn.Text = "AIM"
     AimToggleBtn.Font = Enum.Font.GothamBold
     AimToggleBtn.TextSize = btnFont
-    AimToggleBtn.TextColor3 = THEME.palette.tabInactive
+    AimToggleBtn.TextColor3 = THEME.palette.primaryGreen
+    AimToggleBtn.Visible = false  -- hidden by default (only shows when aimbot is enabled)
     AimToggleBtn.Parent = FloatBtnsGui
     local atCorner = Instance.new("UICorner")
     atCorner.CornerRadius = UDim.new(0, btnRadius)
     atCorner.Parent = AimToggleBtn
     local atStroke = Instance.new("UIStroke")
-    atStroke.Color = THEME.palette.primaryGray
+    atStroke.Color = THEME.palette.primaryGreen
     atStroke.Thickness = 1
-    atStroke.Transparency = 0.4
+    atStroke.Transparency = 0
     atStroke.Parent = AimToggleBtn
 
     local function updateAimBtn()
-        if Config.Aimbot.Enabled then
+        -- AIM button only visible when aimbot master toggle is ON
+        AimToggleBtn.Visible = Config.Aimbot.Enabled
+        -- Button color reflects aiming state (green=aiming, gray=not aiming)
+        if aiming then
             AimToggleBtn.TextColor3 = THEME.palette.primaryGreen
             atStroke.Color = THEME.palette.primaryGreen
             atStroke.Transparency = 0
         else
-            AimToggleBtn.TextColor3 = THEME.palette.tabInactive
+            AimToggleBtn.TextColor3 = THEME.palette.muted
             atStroke.Color = THEME.palette.primaryGray
             atStroke.Transparency = 0.4
         end
     end
+
+    -- Detect inventory open/close by passively reading InventoryUI.Enabled
+    -- (completely indetectable - just reading a property, no hooks)
+    local function isInventoryOpen()
+        local pg = LocalPlayer:FindFirstChild("PlayerGui")
+        if not pg then return false end
+        local inv = pg:FindFirstChild("InventoryUI")
+        if not inv or not inv:IsA("ScreenGui") then return false end
+        return inv.Enabled
+    end
+
+    -- Loop to hide buttons when inventory is open, and sync AIM button visibility
+    RunService.RenderStepped:Connect(function()
+        local invOpen = isInventoryOpen()
+        if invOpen then
+            GuiToggleBtn.Visible = false
+            AimToggleBtn.Visible = false
+        else
+            GuiToggleBtn.Visible = true
+            -- AIM button visible only when aimbot master toggle is ON
+            local shouldShowAim = Config.Aimbot.Enabled
+            if AimToggleBtn.Visible ~= shouldShowAim then
+                AimToggleBtn.Visible = shouldShowAim
+            end
+            -- Update color based on aiming state
+            if shouldShowAim then
+                if aiming then
+                    AimToggleBtn.TextColor3 = THEME.palette.primaryGreen
+                    atStroke.Color = THEME.palette.primaryGreen
+                    atStroke.Transparency = 0
+                else
+                    AimToggleBtn.TextColor3 = THEME.palette.muted
+                    atStroke.Color = THEME.palette.primaryGray
+                    atStroke.Transparency = 0.4
+                end
+            end
+        end
+    end)
 
     GuiToggleBtn.MouseButton1Click:Connect(function()
         guiVisible = not guiVisible
@@ -3284,7 +3328,7 @@ if not isPC then
     end)
 
     AimToggleBtn.MouseButton1Click:Connect(function()
-        Config.Aimbot.Enabled = not Config.Aimbot.Enabled
+        aiming = not aiming  -- toggle current aim state (NOT the master toggle)
         updateAimBtn()
     end)
 
