@@ -45,7 +45,7 @@ local Config = {
     Items    = { Enabled=false, Name=true, Distance=true, Box=true, Tracer=false, Color=Color3.fromRGB(180,255,120),  MaxDistance=600  },
     Aimbot = {
         Enabled=false, WallCheck=true, SquadCheck=true,
-        TargetPart="HumanoidRootPart",
+        TargetPart="Head",
         AimKey=Enum.KeyCode.E,
         UseMouseInput=true,
         MouseButton=Enum.UserInputType.MouseButton2,
