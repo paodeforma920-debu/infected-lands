@@ -2079,11 +2079,17 @@ local function updateMinimap()
     local imgHalf = imgScale / 2
     local imgIdealX = 0.5 - (px - 0.5) * imgScale
     local imgIdealY = 0.5 - (py - 0.5) * imgScale
-    local imgMin = 1 - imgHalf
-    local imgMax = imgHalf
-    if imgMin > imgMax then imgMin = 0.5 imgMax = 0.5 end
-    local imgClampedX = math.clamp(imgIdealX, imgMin, imgMax)
-    local imgClampedY = math.clamp(imgIdealY, imgMin, imgMax)
+    local imgClampedX, imgClampedY
+    if Config.Misc.MinimapFollow then
+        imgClampedX = imgIdealX
+        imgClampedY = imgIdealY
+    else
+        local imgMin = 1 - imgHalf
+        local imgMax = imgHalf
+        if imgMin > imgMax then imgMin = 0.5 imgMax = 0.5 end
+        imgClampedX = math.clamp(imgIdealX, imgMin, imgMax)
+        imgClampedY = math.clamp(imgIdealY, imgMin, imgMax)
+    end
     MinimapImage.Size = UDim2.fromScale(imgScale, imgScale)
     MinimapImage.Position = UDim2.fromScale(imgClampedX, imgClampedY)
     local lookVector = hrp.CFrame.LookVector
