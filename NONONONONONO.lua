@@ -2580,17 +2580,26 @@ if not isPC then
         end
     end
 
-    local function isInventoryOpen()
+    -- Detecta se algum menu do jogo (inventario, squad) esta aberto
+    -- para esconder os botoes flutuantes e evitar overlap
+    local function isGameMenuOpen()
         local pg = LocalPlayer:FindFirstChild("PlayerGui")
         if not pg then return false end
+        -- Inventario
         local inv = pg:FindFirstChild("InventoryUI")
-        if not inv or not inv:IsA("ScreenGui") then return false end
-        return inv.Enabled
+        if inv and inv:IsA("ScreenGui") and inv.Enabled then return true end
+        -- Squad panel (SquadController.u95 = SquadUI.Panel)
+        local squadGui = pg:FindFirstChild("SquadUI")
+        if squadGui and squadGui:IsA("ScreenGui") then
+            local panel = squadGui:FindFirstChild("Panel")
+            if panel and panel:IsA("Frame") and panel.Visible then return true end
+        end
+        return false
     end
 
     RunService.RenderStepped:Connect(function()
-        local invOpen = isInventoryOpen()
-        if invOpen then
+        local menuOpen = isGameMenuOpen()
+        if menuOpen then
             GuiToggleBtn.Visible = false
             AimToggleBtn.Visible = false
         else
