@@ -3,6 +3,13 @@
 
 local VERSION = "1.0.0"
 
+local ALLOWED_PLACE_ID = 122789100578830
+if game.PlaceId ~= ALLOWED_PLACE_ID then
+    warn(("(%d) nao permitido. jogo errado.")
+        :format(game.PlaceId, ALLOWED_PLACE_ID))
+    return
+end
+
 -- Anti-double-load
 if getgenv and getgenv().ESP_SCRIPT_LOADED then
     warn("[ESP+Aimbot] Script ja esta rodando.")
