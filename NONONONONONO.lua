@@ -1,5 +1,14 @@
--- VERSION - shown in the unload confirmation message.
+-- ESP + Aimbot Script
+-- Players / Corpses / Vehicles / Items | Aimbot (Players, Wall Check)
+
 local VERSION = "1.0.0"
+
+-- Anti-double-load
+if getgenv and getgenv().ESP_SCRIPT_LOADED then
+    warn("[ESP+Aimbot] Script ja esta rodando.")
+    return
+end
+if getgenv then getgenv().ESP_SCRIPT_LOADED = true end
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -10,86 +19,48 @@ local CoreGui = game:GetService("CoreGui")
 local LocalPlayer = Players.LocalPlayer
 local Camera = workspace.CurrentCamera
 
--- Platform detection
+-- Deteccao de plataforma
 local isPC = UserInputService.KeyboardEnabled and not UserInputService.TouchEnabled
-local guiVisible = false  -- forward declaration (used by floating buttons before main assignment)
+local guiVisible = false
 
--- Load StudsToMeters conversion factor from SquadConfig (same as the game uses)
-local StudsToMeters = 1  -- fallback if SquadConfig fails to load
+-- Fator de conversao studs -> metros (do SquadConfig do jogo)
+local StudsToMeters = 1
 pcall(function()
     local cfg = require(game:GetService("ReplicatedStorage").Shared.SquadConfig)
-    if cfg and type(cfg.StudsToMeters) == "number" then
-        StudsToMeters = cfg.StudsToMeters
-    end
+    if cfg and type(cfg.StudsToMeters) == "number" then StudsToMeters = cfg.StudsToMeters end
 end)
 
---======================================================
--- Forward declarations for cleanup tracking
--- These are defined later but used by code above their definition site,
--- so we declare them as locals here and assign the real function later.
---======================================================
+-- Forward declarations para cleanup
 local CleanupRegistry
 local trackConnection
 local trackRenderStep
 local trackGui
-local connectRenderStepped
 
---======================================================
 -- Config
---======================================================
 local Config = {
     Players  = { Enabled=true,  Name=true, Distance=true, Box=true, Tracer=true, Health=true, Skeleton=false, Color=Color3.fromRGB(255,90,90),    MaxDistance=1500 },
     Corpses  = { Enabled=false, Name=true, Distance=true, Box=true, Tracer=false, Color=Color3.fromRGB(170,170,180),  MaxDistance=800  },
     Vehicles = { Enabled=false, Name=true, Distance=true, Box=true, Tracer=false, Color=Color3.fromRGB(80,180,255),   MaxDistance=2000 },
-    LootVeh  = { Enabled=false, Name=true, Distance=true, Box=true, Tracer=false, Color=Color3.fromRGB(255,200,80),   MaxDistance=1500 },
     Items    = { Enabled=false, Name=true, Distance=true, Box=true, Tracer=false, Color=Color3.fromRGB(180,255,120),  MaxDistance=600  },
     Aimbot = {
         Enabled=false, WallCheck=true, SquadCheck=true,
-        TargetPart="Head",
-        AimKey=Enum.KeyCode.E,
-        UseMouseInput=true,
-        MouseButton=Enum.UserInputType.MouseButton2,
+        TargetPart="HumanoidRootPart", AimKey=Enum.KeyCode.E,
+        UseMouseInput=true, MouseButton=Enum.UserInputType.MouseButton2,
         FOV=120, Smoothness=0.25, MaxDistance=800,
         ShowFOV=true, FOVColor=Color3.fromRGB(255,255,255),
     },
-    Squad = {
-        AllyColor = Color3.fromRGB(70, 230, 110), -- green for allies
-    },
+    Squad = { AllyColor = Color3.fromRGB(70, 230, 110) },
     Misc = {
-        Fullbright = false,
-        FullbrightStrength = 0.5,  -- 0 to 1, scaled to intensity
-        NoFog = false,
-        NoRain = false,
-        Radar = false,
-        Minimap = false,
-        MinimapSize = 200,        -- pixels
-        MinimapZoom = 0.5,        -- 0.1 to 2.0 (1.0 = same as full map)
-        MinimapOpacity = 0.85,    -- 0 to 1
-        MinimapFollow = true,     -- camera follows player rotation
+        Fullbright=false, FullbrightStrength=0.5, NoFog=false, NoRain=false,
+        Radar=false, Minimap=false, MinimapSize=200, MinimapZoom=0.5,
+        MinimapOpacity=0.85, MinimapFollow=true,
     },
     TextSize=13,
 }
 
-local COLORS = {
-    bg       = Color3.fromRGB(18,18,22),
-    header   = Color3.fromRGB(28,28,34),
-    section  = Color3.fromRGB(35,35,42),
-    card     = Color3.fromRGB(24,24,30),
-    accent   = Color3.fromRGB(120,200,255),
-    text     = Color3.fromRGB(235,235,240),
-    subtext  = Color3.fromRGB(160,160,170),
-    toggleOff= Color3.fromRGB(60,60,68),
-    toggleOn = Color3.fromRGB(90,200,130),
-    divider  = Color3.fromRGB(45,45,52),
-    tabIdle  = Color3.fromRGB(28,28,34),
-    tabActive= Color3.fromRGB(50,50,60),
-}
-
---======================================================
--- Squad hook (allies detection via SquadState remote)
---======================================================
-local SquadMembers = {}            -- UserId -> Color3 (ally color)
-local SquadNames   = {}            -- player name -> true (fallback match)
+-- Squad hook (deteccao de aliados)
+local SquadMembers = {}
+local SquadNames = {}
 
 local function refreshSquadNames()
     table.clear(SquadNames)
@@ -100,30 +71,24 @@ local function refreshSquadNames()
 end
 
 local function isAlly(playerModel)
-    -- Try by UserId attribute first
     local uid = playerModel:GetAttribute("UserId")
     if uid and SquadMembers[uid] then return true, SquadMembers[uid] end
-    -- Try by name (Players folder uses player name)
-    if SquadNames[playerModel.Name] then
-        return true, Config.Squad.AllyColor
-    end
+    if SquadNames[playerModel.Name] then return true, Config.Squad.AllyColor end
     return false, nil
 end
 
 do
-    -- Hook the SquadState remote (best-effort, no errors if missing)
     pcall(function()
         local ReplicatedStorage = game:GetService("ReplicatedStorage")
         local network = ReplicatedStorage:WaitForChild("Shared"):WaitForChild("network", 5)
         if not network then return end
-        local SquadState  = network:FindFirstChild("SquadState")
+        local SquadState = network:FindFirstChild("SquadState")
         local SquadRequest = network:FindFirstChild("SquadRequest")
         if SquadState and SquadState:IsA("RemoteEvent") then
             SquadState.OnClientEvent:Connect(function(state)
                 if typeof(state) ~= "table" then return end
                 table.clear(SquadMembers)
                 if state.HasSquad and typeof(state.Members) == "table" then
-                    -- Try to load SquadConfig for member colors
                     local memberColors = nil
                     pcall(function()
                         local cfg = require(ReplicatedStorage.Shared.SquadConfig)
@@ -140,64 +105,33 @@ do
                 refreshSquadNames()
             end)
         end
-        -- Request current state so we don't need to open the squad menu
         if SquadRequest and SquadRequest:IsA("RemoteEvent") then
             task.delay(1, function()
-                pcall(function()
-                    SquadRequest:FireServer({Action = "RequestState"})
-                end)
+                pcall(function() SquadRequest:FireServer({Action = "RequestState"}) end)
             end)
         end
     end)
-    -- Refresh name cache periodically (in case players join/leave)
     task.spawn(function()
-        while true do
-            refreshSquadNames()
-            task.wait(5)
-        end
+        while true do refreshSquadNames() task.wait(5) end
     end)
 end
 
---======================================================
--- Cleanup registry (for unload)
--- MUST be defined here (before any code that uses trackConnection/trackGui)
--- because top-level code runs in source order at load time.
---======================================================
-CleanupRegistry = {
-    connections = {},       -- list of RBXScriptConnection
-    renderStepBinds = {},   -- list of names passed to BindToRenderStep
-    guis = {},              -- list of ScreenGui instances to destroy
-    loaded = true,          -- set false after unload to prevent re-connection
-}
-
+-- Cleanup registry
+CleanupRegistry = { connections={}, renderStepBinds={}, guis={}, loaded=true }
 trackConnection = function(conn)
-    if conn and CleanupRegistry.loaded then
-        table.insert(CleanupRegistry.connections, conn)
-    end
+    if conn and CleanupRegistry.loaded then table.insert(CleanupRegistry.connections, conn) end
     return conn
 end
-
 trackRenderStep = function(name)
-    if CleanupRegistry.loaded then
-        table.insert(CleanupRegistry.renderStepBinds, name)
-    end
+    if CleanupRegistry.loaded then table.insert(CleanupRegistry.renderStepBinds, name) end
 end
-
 trackGui = function(gui)
-    if gui and CleanupRegistry.loaded then
-        table.insert(CleanupRegistry.guis, gui)
-    end
+    if gui and CleanupRegistry.loaded then table.insert(CleanupRegistry.guis, gui) end
     return gui
 end
 
-connectRenderStepped = function(fn)
-    return trackConnection(RunService.RenderStepped:Connect(fn))
-end
-
---======================================================
 -- ESP Core
---======================================================
-local Entries = { Players={}, Corpses={}, Vehicles={}, LootVeh={}, Items={} }
+local Entries = { Players={}, Corpses={}, Vehicles={}, Items={} }
 
 local function newDrawing(class, props)
     local d = Drawing.new(class)
@@ -208,7 +142,6 @@ end
 local function clearEntry(e)
     if not e then return end
     for _,d in pairs(e) do
-        -- Skeleton is a sub-table of lines, recurse
         if type(d) == "table" then
             for _, sub in ipairs(d) do pcall(function() sub:Remove() end) end
         else
@@ -219,51 +152,31 @@ end
 
 local function getEntry(tbl, key)
     if not tbl[key] then
-        local entry = {
-            Box   = newDrawing("Square",{Thickness=1,Filled=false,Transparency=1}),
-            Name  = newDrawing("Text",{Size=Config.TextSize,Center=true,Outline=true,Font=2}),
-            Dist  = newDrawing("Text",{Size=Config.TextSize,Center=true,Outline=true,Font=2}),
-            Tracer= newDrawing("Line",{Thickness=1,Transparency=1}),
-            Skeleton = {},  -- pool of line drawings (lazy-created)
+        tbl[key] = {
+            Box = newDrawing("Square",{Thickness=1,Filled=false,Transparency=1}),
+            Name = newDrawing("Text",{Size=Config.TextSize,Center=true,Outline=true,Font=2}),
+            Dist = newDrawing("Text",{Size=Config.TextSize,Center=true,Outline=true,Font=2}),
+            Tracer = newDrawing("Line",{Thickness=1,Transparency=1}),
+            Skeleton = {},
         }
-        tbl[key] = entry
     end
     return tbl[key]
 end
 
--- Skeleton ESP connections
--- R6 layout
 local SKELETON_R6 = {
-    {"Head", "Torso"},
-    {"Torso", "Left Arm"},
-    {"Torso", "Right Arm"},
-    {"Torso", "Left Leg"},
-    {"Torso", "Right Leg"},
+    {"Head","Torso"},{"Torso","Left Arm"},{"Torso","Right Arm"},{"Torso","Left Leg"},{"Torso","Right Leg"},
 }
--- R15 layout
 local SKELETON_R15 = {
-    {"Head", "UpperTorso"},
-    {"UpperTorso", "LowerTorso"},
-    {"UpperTorso", "LeftUpperArm"},
-    {"LeftUpperArm", "LeftLowerArm"},
-    {"LeftLowerArm", "LeftHand"},
-    {"UpperTorso", "RightUpperArm"},
-    {"RightUpperArm", "RightLowerArm"},
-    {"RightLowerArm", "RightHand"},
-    {"LowerTorso", "LeftUpperLeg"},
-    {"LeftUpperLeg", "LeftLowerLeg"},
-    {"LeftLowerLeg", "LeftFoot"},
-    {"LowerTorso", "RightUpperLeg"},
-    {"RightUpperLeg", "RightLowerLeg"},
-    {"RightLowerLeg", "RightFoot"},
+    {"Head","UpperTorso"},{"UpperTorso","LowerTorso"},
+    {"UpperTorso","LeftUpperArm"},{"LeftUpperArm","LeftLowerArm"},{"LeftLowerArm","LeftHand"},
+    {"UpperTorso","RightUpperArm"},{"RightUpperArm","RightLowerArm"},{"RightLowerArm","RightHand"},
+    {"LowerTorso","LeftUpperLeg"},{"LeftUpperLeg","LeftLowerLeg"},{"LeftLowerLeg","LeftFoot"},
+    {"LowerTorso","RightUpperLeg"},{"RightUpperLeg","RightLowerLeg"},{"RightLowerLeg","RightFoot"},
 }
 
 local function getSkeletonConnections(model)
-    if model:FindFirstChild("UpperTorso") then
-        return SKELETON_R15
-    elseif model:FindFirstChild("Torso") then
-        return SKELETON_R6
-    end
+    if model:FindFirstChild("UpperTorso") then return SKELETON_R15
+    elseif model:FindFirstChild("Torso") then return SKELETON_R6 end
     return nil
 end
 
@@ -276,34 +189,15 @@ end
 
 local function hideSkeleton(entry)
     if not entry.Skeleton then return end
-    for _, line in ipairs(entry.Skeleton) do
-        line.Visible = false
-    end
-end
-
-local function clearSkeleton(entry)
-    if not entry.Skeleton then return end
-    for _, line in ipairs(entry.Skeleton) do
-        pcall(function() line:Remove() end)
-    end
-    entry.Skeleton = {}
+    for _, line in ipairs(entry.Skeleton) do line.Visible = false end
 end
 
 local function getBB(model)
-    -- Prefer HumanoidRootPart directly: GetBoundingBox is unreliable for characters
-    -- in unusual poses (prone, ragdoll, sitting) and can produce flying ESP.
-    if model:IsA("BasePart") then
-        return model.CFrame, model.Size
-    end
+    if model:IsA("BasePart") then return model.CFrame, model.Size end
     local hrp = model:FindFirstChild("HumanoidRootPart")
-    if hrp and hrp:IsA("BasePart") then
-        return hrp.CFrame, Vector3.new(4, 6, 3)
-    end
-    -- Fallbacks for non-character models (vehicles, corpses, items)
+    if hrp and hrp:IsA("BasePart") then return hrp.CFrame, Vector3.new(4, 6, 3) end
     local torso = model:FindFirstChild("Torso") or model:FindFirstChild("UpperTorso") or model.PrimaryPart
-    if torso and torso:IsA("BasePart") then
-        return torso.CFrame, Vector3.new(4, 6, 3)
-    end
+    if torso and torso:IsA("BasePart") then return torso.CFrame, Vector3.new(4, 6, 3) end
     local cf, size
     local ok = pcall(function() cf, size = model:GetBoundingBox() end)
     if not ok or not cf then return nil end
@@ -311,8 +205,8 @@ local function getBB(model)
 end
 
 local function w2s(pos)
+    if not Camera or not pos then return Vector2.zero, false, 0 end
     local s,on = Camera:WorldToViewportPoint(pos)
-    -- Force on=false if behind camera (Z <= 0). Roblox sometimes returns true here, causing flying ESP.
     if s.Z <= 0 then on = false end
     return Vector2.new(s.X,s.Y), on, s.Z
 end
@@ -324,7 +218,6 @@ end
 local function hideAll(entry)
     for _,d in pairs(entry) do
         if type(d) == "table" then
-            -- Skeleton sub-table
             for _, line in ipairs(d) do pcall(function() line.Visible = false end) end
         else
             pcall(function() d.Visible = false end)
@@ -333,8 +226,6 @@ local function hideAll(entry)
 end
 
 local function renderEntry(entry, model, cfg, label, health)
-    -- Get the base position: prefer HumanoidRootPart, this is the most stable anchor
-    -- for player ESP (GetBoundingBox gets weird with prone/ragdoll/sit poses).
     local hrp = model:FindFirstChild("HumanoidRootPart")
     local pos
     if hrp and hrp:IsA("BasePart") then
@@ -345,33 +236,20 @@ local function renderEntry(entry, model, cfg, label, health)
         pos = cf.Position
     end
 
+    if not Camera then hideAll(entry) return end
     local camPos = Camera.CFrame.Position
     local dist = (camPos - pos).Magnitude
     if dist > cfg.MaxDistance then hideAll(entry) return end
-    -- Reject ESP that is essentially on top of the camera (fixes "ESP stuck on me" bug)
     if dist < 2 then hideAll(entry) return end
 
-    -- Use fixed box dimensions anchored on HRP. This is more reliable than
-    -- using model:GetBoundingBox which can flip in/out of weird poses.
-    local halfH = 3  -- 6 studs tall box centered on HRP
-    local topPos = pos + Vector3.new(0, halfH, 0)
-    local botPos = pos - Vector3.new(0, halfH, 0)
-    local topScreen, topOn = w2s(topPos)
-    local botScreen, botOn = w2s(botPos)
-    -- Use center as fallback if top/bot are off-screen edges but center is visible
+    local halfH = 3
+    local topScreen, topOn = w2s(pos + Vector3.new(0, halfH, 0))
+    local botScreen, botOn = w2s(pos - Vector3.new(0, halfH, 0))
     local ctrScreen, ctrOn = w2s(pos)
-    -- Hide only if NONE of the points are visible
     if not (topOn or botOn or ctrOn) then hideAll(entry) return end
-    -- If center is visible but top/bot aren't (player partially off-screen),
-    -- use the center for everything
-    if not topOn and not botOn and ctrOn then
-        topScreen = ctrScreen
-        botScreen = ctrScreen
-    end
+    if not topOn and not botOn and ctrOn then topScreen = ctrScreen botScreen = ctrScreen end
 
     local height = math.abs(botScreen.Y - topScreen.Y)
-    -- Don't hide small boxes — just clamp to a minimum visible size.
-    -- (Players far away still need ESP, even if box is only 5-10 pixels tall.)
     if height < 6 then height = 6 end
     if height > 1000 then height = 1000 end
     local width = height * 0.55
@@ -384,7 +262,6 @@ local function renderEntry(entry, model, cfg, label, health)
         entry.Box.Visible = true
     else entry.Box.Visible=false end
 
-    -- Build label with optional health suffix
     local displayLabel = label
     if cfg.Health and health ~= nil then
         displayLabel = string.format("%s [%d]", label, math.max(0, math.floor(health)))
@@ -412,7 +289,6 @@ local function renderEntry(entry, model, cfg, label, health)
         entry.Tracer.Visible = true
     else entry.Tracer.Visible=false end
 
-    -- Skeleton ESP (only meaningful for player-like models with limbs)
     if cfg.Skeleton then
         local connections = getSkeletonConnections(model)
         if connections then
@@ -424,28 +300,13 @@ local function renderEntry(entry, model, cfg, label, health)
                     local s1, on1 = w2s(p1.Position)
                     local s2, on2 = w2s(p2.Position)
                     if on1 and on2 then
-                        line.From = s1
-                        line.To = s2
-                        line.Color = cfg.Color
-                        line.Thickness = 1
-                        line.Visible = true
-                    else
-                        line.Visible = false
-                    end
-                else
-                    line.Visible = false
-                end
+                        line.From = s1 line.To = s2 line.Color = cfg.Color line.Thickness = 1 line.Visible = true
+                    else line.Visible = false end
+                else line.Visible = false end
             end
-            -- Hide any extra lines from previous layouts
-            for idx = #connections + 1, #entry.Skeleton do
-                entry.Skeleton[idx].Visible = false
-            end
-        else
-            hideSkeleton(entry)
-        end
-    else
-        hideSkeleton(entry)
-    end
+            for idx = #connections + 1, #entry.Skeleton do entry.Skeleton[idx].Visible = false end
+        else hideSkeleton(entry) end
+    else hideSkeleton(entry) end
 end
 
 local function disableAll(tbl)
@@ -453,37 +314,28 @@ local function disableAll(tbl)
     table.clear(tbl)
 end
 
---======================================================
 -- Updaters
---======================================================
 local function updatePlayers()
     local f = workspace:FindFirstChild("Players")
     if not f then return end
     for _,m in ipairs(f:GetChildren()) do
         if m ~= LocalPlayer.Character and m:IsA("Model") then
             local e = getEntry(Entries.Players, m.Name)
-            -- Check Humanoid health: hide ESP for dead players
             local hum = m:FindFirstChildOfClass("Humanoid")
             if hum and hum.Health <= 0 then
                 hideAll(e)
             else
-                -- If this player is a squad ally, override config color with ally color
                 local ally, allyColor = isAlly(m)
                 local cfg = Config.Players
                 local label = m.Name
                 if ally then
                     cfg = {
-                        Enabled = Config.Players.Enabled,
-                        Name = Config.Players.Name,
-                        Distance = Config.Players.Distance,
-                        Box = Config.Players.Box,
-                        Tracer = Config.Players.Tracer,
-                        Health = Config.Players.Health,
-                        Skeleton = Config.Players.Skeleton,
-                        MaxDistance = Config.Players.MaxDistance,
-                        Color = allyColor or Config.Squad.AllyColor,
+                        Enabled=Config.Players.Enabled, Name=Config.Players.Name, Distance=Config.Players.Distance,
+                        Box=Config.Players.Box, Tracer=Config.Players.Tracer, Health=Config.Players.Health,
+                        Skeleton=Config.Players.Skeleton, MaxDistance=Config.Players.MaxDistance,
+                        Color=allyColor or Config.Squad.AllyColor,
                     }
-                    label = "[ALLY] " .. m.Name
+                    label = "[ALIADO] " .. m.Name
                 end
                 local health = hum and hum.Health or nil
                 renderEntry(e, m, cfg, label, health)
@@ -515,7 +367,7 @@ local function updateVehicles()
     for idx,m in ipairs(f:GetChildren()) do
         if m:IsA("Model") and not isBurned(m.Name) then
             local key = (m.Name ~= "" and m.Name) or ("idx_"..idx)
-            local label = (m.Name ~= "" and m.Name) or ("Vehicle "..idx)
+            local label = (m.Name ~= "" and m.Name) or ("Veiculo "..idx)
             local e = getEntry(Entries.Vehicles, key)
             renderEntry(e, m, Config.Vehicles, label)
         end
@@ -529,29 +381,6 @@ local function updateVehicles()
     end
     for k,e in pairs(Entries.Vehicles) do
         if not seen[k] then clearEntry(e) Entries.Vehicles[k]=nil end
-    end
-end
-
-local function updateLootVehicles()
-    local map = workspace:FindFirstChild("Map")
-    if not map then return end
-    local misc = map:FindFirstChild("Misc Props")
-    if not misc then return end
-    local f = misc:FindFirstChild("Vehicles")
-    if not f then return end
-    local seen = {}
-    for idx,m in ipairs(f:GetChildren()) do
-        if m:IsA("Model") and not isBurned(m.Name) then
-            local baseName = (m.Name ~= "" and m.Name) or ("Vehicle "..idx)
-            local key = "loot_"..idx
-            local label = baseName.." (loot)"
-            seen[key] = true
-            local e = getEntry(Entries.LootVeh, key)
-            renderEntry(e, m, Config.LootVeh, label)
-        end
-    end
-    for k,e in pairs(Entries.LootVeh) do
-        if not seen[k] then clearEntry(e) Entries.LootVeh[k]=nil end
     end
 end
 
@@ -581,16 +410,15 @@ local function updateItems()
 end
 
 trackConnection(RunService.RenderStepped:Connect(function()
-    if Config.Players.Enabled  then pcall(updatePlayers)      else disableAll(Entries.Players)  end
-    if Config.Corpses.Enabled  then pcall(updateCorpses)      else disableAll(Entries.Corpses)  end
-    if Config.Vehicles.Enabled then pcall(updateVehicles)     else disableAll(Entries.Vehicles) end
-    if Config.LootVeh.Enabled  then pcall(updateLootVehicles) else disableAll(Entries.LootVeh)  end
-    if Config.Items.Enabled    then pcall(updateItems)        else disableAll(Entries.Items)    end
+    if not Camera then Camera = workspace.CurrentCamera end
+    if not Camera then return end
+    if Config.Players.Enabled then pcall(updatePlayers) else disableAll(Entries.Players) end
+    if Config.Corpses.Enabled then pcall(updateCorpses) else disableAll(Entries.Corpses) end
+    if Config.Vehicles.Enabled then pcall(updateVehicles) else disableAll(Entries.Vehicles) end
+    if Config.Items.Enabled then pcall(updateItems) else disableAll(Entries.Items) end
 end))
 
---======================================================
 -- Aimbot
---======================================================
 local AimbotFOV = Drawing.new("Circle")
 AimbotFOV.Thickness = 1
 AimbotFOV.NumSides = 60
@@ -604,8 +432,6 @@ local function isAlive(model)
 end
 
 local function findTargetPart(model)
-    -- Try configured part first, then fall back to most stable parts.
-    -- HumanoidRootPart is always present even when prone/crawling.
     local candidates = { Config.Aimbot.TargetPart, "HumanoidRootPart", "Torso", "UpperTorso", "Head" }
     for _, name in ipairs(candidates) do
         local p = model:FindFirstChild(name)
@@ -615,29 +441,26 @@ local function findTargetPart(model)
 end
 
 local function hasLineOfSight(targetPart)
+    if not Camera then return false end
     local origin = Camera.CFrame.Position
     local targetPos = targetPart.Position
     local dir = targetPos - origin
     local params = RaycastParams.new()
     params.FilterType = Enum.RaycastFilterType.Exclude
-    -- Exclude local character AND the target model itself
     local filter = {}
     if LocalPlayer.Character then table.insert(filter, LocalPlayer.Character) end
     if targetPart.Parent then table.insert(filter, targetPart.Parent) end
     params.FilterDescendantsInstances = filter
-    -- Don't use IgnoreWater (some maps hide players behind water)
-    params.RespectCanCollide = false  -- ignore non-collidable stuff (foliage, decorations)
+    params.RespectCanCollide = false
     local result = workspace:Raycast(origin, dir, params)
     if not result then return true end
-    -- If the ray hit something inside the target model, it's still a hit
     if result.Instance and result.Instance:IsDescendantOf(targetPart.Parent) then return true end
-    -- If the ray hit something close to the target position (within 4 studs),
-    -- consider it visible (player partially behind cover)
     local remainingDist = (targetPos - result.Position).Magnitude
     return remainingDist < 4
 end
 
 local function getClosestPlayer()
+    if not Camera then return nil end
     local closest, closestDist = nil, math.huge
     local center = Vector2.new(Camera.ViewportSize.X/2, Camera.ViewportSize.Y/2)
     local folder = workspace:FindFirstChild("Players")
@@ -645,7 +468,6 @@ local function getClosestPlayer()
     local camPos = Camera.CFrame.Position
     for _,m in ipairs(folder:GetChildren()) do
         if m:IsA("Model") and m ~= LocalPlayer.Character and isAlive(m) then
-            -- Skip squad allies if SquadCheck is enabled
             if not Config.Aimbot.SquadCheck or not isAlly(m) then
                 local part = findTargetPart(m)
                 if part then
@@ -653,7 +475,6 @@ local function getClosestPlayer()
                     local worldDist = (partPos - camPos).Magnitude
                     if worldDist <= Config.Aimbot.MaxDistance and worldDist > 2 then
                         local screen, onScreen = Camera:WorldToViewportPoint(partPos)
-                        -- Force onScreen=false if behind camera
                         if onScreen and screen.Z > 0 then
                             local screenPos = Vector2.new(screen.X, screen.Y)
                             local dist = (screenPos - center).Magnitude
@@ -674,24 +495,20 @@ end
 
 local aiming = false
 
--- Keyboard aim key (do NOT check gpe here - the game may consume the key)
-UserInputService.InputBegan:Connect(function(input, gpe)
-    if input.KeyCode == Config.Aimbot.AimKey then
-        aiming = true
-    end
-    -- Mouse input support
-    if Config.Aimbot.UseMouseInput and input.UserInputType == Config.Aimbot.MouseButton then
-        aiming = true
-    end
-end)
-UserInputService.InputEnded:Connect(function(input)
+trackConnection(UserInputService.InputBegan:Connect(function(input, gpe)
+    if not CleanupRegistry.loaded then return end
+    if input.KeyCode == Config.Aimbot.AimKey then aiming = true end
+    if Config.Aimbot.UseMouseInput and input.UserInputType == Config.Aimbot.MouseButton then aiming = true end
+end))
+trackConnection(UserInputService.InputEnded:Connect(function(input)
+    if not CleanupRegistry.loaded then return end
     if input.KeyCode == Config.Aimbot.AimKey then aiming = false end
-    if Config.Aimbot.UseMouseInput and input.UserInputType == Config.Aimbot.MouseButton then
-        aiming = false
-    end
-end)
+    if Config.Aimbot.UseMouseInput and input.UserInputType == Config.Aimbot.MouseButton then aiming = false end
+end))
 
 local function aimbotStep()
+    if not Camera then Camera = workspace.CurrentCamera end
+    if not Camera then return end
     AimbotFOV.Visible = Config.Aimbot.Enabled and Config.Aimbot.ShowFOV
     AimbotFOV.Radius = Config.Aimbot.FOV
     AimbotFOV.Position = Vector2.new(Camera.ViewportSize.X/2, Camera.ViewportSize.Y/2)
@@ -701,21 +518,15 @@ local function aimbotStep()
         local target = getClosestPlayer()
         if target and target.Parent then
             local targetPos = target.Position
-            -- Use lookAt (modern API); fall back to legacy if needed
             local cf
-            local ok = pcall(function()
-                cf = CFrame.lookAt(Camera.CFrame.Position, targetPos)
-            end)
-            if not ok or not cf then
-                cf = CFrame.new(Camera.CFrame.Position, targetPos)
-            end
+            local ok = pcall(function() cf = CFrame.lookAt(Camera.CFrame.Position, targetPos) end)
+            if not ok or not cf then cf = CFrame.new(Camera.CFrame.Position, targetPos) end
             local smooth = math.clamp(Config.Aimbot.Smoothness, 0.05, 1)
             Camera.CFrame = Camera.CFrame:Lerp(cf, smooth)
         end
     end
 end
 
--- Bind AFTER camera update so the game's camera script doesn't overwrite us
 local aimbotBound = false
 pcall(function()
     RunService:BindToRenderStep("AimbotStep", Enum.RenderPriority.Camera.Value + 1, aimbotStep)
@@ -723,34 +534,31 @@ pcall(function()
     trackRenderStep("AimbotStep")
 end)
 if not aimbotBound then
-    -- Fallback: regular RenderStepped
     trackConnection(RunService.RenderStepped:Connect(aimbotStep))
 end
 
---======================================================
--- GUI (game-style: Barlow + grays + grid bg)
---======================================================
+-- GUI
 local THEME = {
     palette = {
-        backgroundGray    = Color3.fromRGB(22, 22, 22),     -- #161616
-        primaryGray       = Color3.fromRGB(223, 223, 223),  -- #DFDFDF
-        white             = Color3.fromRGB(255, 255, 255),
-        primaryGreen      = Color3.fromRGB(166, 196, 179),  -- #A6C4B3
-        backgroundGreen   = Color3.fromRGB(46, 56, 50),     -- #2E3832
-        accentDark        = Color3.fromRGB(51, 62, 49),     -- #333E31
-        tabActive         = Color3.fromRGB(51, 62, 49),
-        tabInactive       = Color3.fromRGB(27, 31, 35),
-        tabIdle           = Color3.fromRGB(27, 31, 35),  -- alias for tabInactive
-        text              = Color3.fromRGB(239, 242, 243),
-        muted             = Color3.fromRGB(158, 168, 171),
-        red               = Color3.fromRGB(255, 65, 65),
-        danger            = Color3.fromRGB(184, 84, 77),
+        backgroundGray = Color3.fromRGB(22, 22, 22),
+        primaryGray = Color3.fromRGB(223, 223, 223),
+        white = Color3.fromRGB(255, 255, 255),
+        primaryGreen = Color3.fromRGB(166, 196, 179),
+        backgroundGreen = Color3.fromRGB(46, 56, 50),
+        accentDark = Color3.fromRGB(51, 62, 49),
+        tabActive = Color3.fromRGB(51, 62, 49),
+        tabInactive = Color3.fromRGB(27, 31, 35),
+        tabIdle = Color3.fromRGB(27, 31, 35),
+        text = Color3.fromRGB(239, 242, 243),
+        muted = Color3.fromRGB(158, 168, 171),
+        red = Color3.fromRGB(255, 65, 65),
+        danger = Color3.fromRGB(184, 84, 77),
     },
     font = {
-        bold      = Font.new("rbxassetid://12187372847", Enum.FontWeight.Bold),
-        semiBold  = Font.new("rbxassetid://12187372847", Enum.FontWeight.SemiBold),
-        medium    = Font.new("rbxassetid://12187372847", Enum.FontWeight.Medium),
-        regular   = Font.new("rbxassetid://12187372847", Enum.FontWeight.Regular),
+        bold = Font.new("rbxassetid://12187372847", Enum.FontWeight.Bold),
+        semiBold = Font.new("rbxassetid://12187372847", Enum.FontWeight.SemiBold),
+        medium = Font.new("rbxassetid://12187372847", Enum.FontWeight.Medium),
+        regular = Font.new("rbxassetid://12187372847", Enum.FontWeight.Regular),
     },
 }
 
@@ -770,9 +578,6 @@ ScreenGui.IgnoreGuiInset = true
 ScreenGui.Parent = getGuiParent()
 trackGui(ScreenGui)
 
---======================================================
--- Main window
---======================================================
 local Main = Instance.new("Frame")
 Main.Name = "Main"
 if isPC then
@@ -798,9 +603,6 @@ MainStroke.Thickness = 2
 MainStroke.Transparency = 0.35
 MainStroke.Parent = Main
 
---======================================================
--- Custom drag (header only)
---======================================================
 local dragging_main = false
 local dragStart, startPos
 local function setupDrag(frame)
@@ -817,7 +619,8 @@ local function setupDrag(frame)
         end
     end)
 end
-UserInputService.InputChanged:Connect(function(input)
+trackConnection(UserInputService.InputChanged:Connect(function(input)
+    if not CleanupRegistry.loaded then return end
     if dragging_main and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
         local delta = input.Position - dragStart
         Main.Position = UDim2.new(
@@ -825,11 +628,8 @@ UserInputService.InputChanged:Connect(function(input)
             startPos.Y.Scale, startPos.Y.Offset + delta.Y
         )
     end
-end)
+end))
 
---======================================================
--- Header bar (42px, white at 80% transparency)
---======================================================
 local Header = Instance.new("Frame")
 Header.Name = "Header"
 Header.Size = UDim2.new(1, 0, 0, 42)
@@ -840,7 +640,6 @@ Header.Parent = Main
 setupDrag(Header)
 
 local HeaderTitle = Instance.new("TextLabel")
-HeaderTitle.Name = "Title"
 HeaderTitle.BackgroundTransparency = 1
 HeaderTitle.Size = UDim2.new(1, -50, 1, 0)
 HeaderTitle.Position = UDim2.new(0, 12, 0, 0)
@@ -851,25 +650,20 @@ HeaderTitle.TextSize = 18
 HeaderTitle.TextXAlignment = Enum.TextXAlignment.Left
 HeaderTitle.Parent = Header
 
--- Dynamic header: name + FPS + ping (updated every frame)
 local StatsService = game:GetService("Stats")
 local lastFrame = tick()
 local fpsSmoothed = 60
-local fpsConn = nil
 local function updateHeaderStats()
     local now = tick()
     local dt = now - lastFrame
     lastFrame = now
     if dt > 0 then
         local instantFps = 1 / dt
-        -- exponential smoothing for stable display
         fpsSmoothed = fpsSmoothed * 0.9 + instantFps * 0.1
     end
     local ping = 0
     pcall(function()
-        if LocalPlayer.GetNetworkPing then
-            ping = LocalPlayer:GetNetworkPing() * 1000
-        end
+        if LocalPlayer.GetNetworkPing then ping = LocalPlayer:GetNetworkPing() * 1000 end
     end)
     if ping == 0 then
         pcall(function()
@@ -882,12 +676,13 @@ local function updateHeaderStats()
     end
     HeaderTitle.Text = string.format("%s  |  %d FPS  |  %d ms", LocalPlayer.Name, math.floor(fpsSmoothed), math.floor(ping))
 end
-fpsConn = trackConnection(RunService.RenderStepped:Connect(function()
+trackConnection(RunService.RenderStepped:Connect(function()
+    if not Camera then Camera = workspace.CurrentCamera end
+    if not Camera then return end
     pcall(updateHeaderStats)
 end))
 
 local CloseBtn = Instance.new("TextButton")
-CloseBtn.Name = "Close"
 CloseBtn.Size = UDim2.new(0, 32, 0, 32)
 CloseBtn.Position = UDim2.new(1, -36, 0.5, -16)
 CloseBtn.BackgroundColor3 = THEME.palette.backgroundGray
@@ -907,13 +702,9 @@ closeStroke.Color = THEME.palette.primaryGray
 closeStroke.Thickness = 1
 closeStroke.Transparency = 0.72
 closeStroke.Parent = CloseBtn
-CloseBtn.MouseButton1Click:Connect(function()
-    Main.Visible = false
-end)
+CloseBtn.MouseButton1Click:Connect(function() Main.Visible = false end)
 
--- Header bottom separator (4px, white 80%)
 local HeaderSep = Instance.new("Frame")
-HeaderSep.Name = "HeaderSeparator"
 HeaderSep.Size = UDim2.new(1, 0, 0, 4)
 HeaderSep.Position = UDim2.new(0, 0, 1, -4)
 HeaderSep.BackgroundColor3 = THEME.palette.white
@@ -921,9 +712,6 @@ HeaderSep.BackgroundTransparency = 0.8
 HeaderSep.BorderSizePixel = 0
 HeaderSep.Parent = Header
 
---======================================================
--- Helper: column (mirrors the game's column() function)
---======================================================
 local function makeColumn(name, position, headerText)
     local col = Instance.new("Frame")
     col.Name = name
@@ -945,9 +733,7 @@ local function makeColumn(name, position, headerText)
     colStroke.Transparency = 0.72
     colStroke.Parent = col
 
-    -- Inner header (42px, white 80% transparency, centered title)
     local innerHeader = Instance.new("Frame")
-    innerHeader.Name = "InnerHeader"
     innerHeader.Size = UDim2.new(1, 0, 0, 42)
     innerHeader.BackgroundColor3 = THEME.palette.white
     innerHeader.BackgroundTransparency = 0.8
@@ -971,7 +757,6 @@ local function makeColumn(name, position, headerText)
     innerSep.BorderSizePixel = 0
     innerSep.Parent = innerHeader
 
-    -- Scrollable content
     local scroll = Instance.new("ScrollingFrame")
     scroll.Name = "Scroll"
     scroll.Size = UDim2.new(1, 0, 1, -42)
@@ -1002,18 +787,14 @@ local function makeColumn(name, position, headerText)
     return scroll
 end
 
-local ESPScroll    = makeColumn("ESPColumn",   UDim2.new(0, 0, 0, 50), "ESP")
-local AimScroll    = makeColumn("AimbotColumn", UDim2.new(1/4, 4, 0, 50), "AIMBOT")
-local MiscScroll   = makeColumn("MiscColumn",   UDim2.new(2/4, 8, 0, 50), "MISC")
+local ESPScroll = makeColumn("ESPColumn", UDim2.new(0, 0, 0, 50), "ESP")
+local AimScroll = makeColumn("AimbotColumn", UDim2.new(1/4, 4, 0, 50), "AIMBOT")
+local MiscScroll = makeColumn("MiscColumn", UDim2.new(2/4, 8, 0, 50), "MISC")
 local ConfigScroll = makeColumn("ConfigColumn", UDim2.new(3/4, 12, 0, 50), "CONFIG")
 
---======================================================
--- UI components (game-style)
---======================================================
 local orderCounter = 0
 local function nextOrder() orderCounter = orderCounter + 1 return orderCounter end
 
--- Section header inside a column (text only, with bottom separator)
 local function addSection(parent, text, accentColor)
     local section = Instance.new("Frame")
     section.Size = UDim2.new(1, 0, 0, 32)
@@ -1038,17 +819,15 @@ local function addSection(parent, text, accentColor)
     sep.BackgroundTransparency = 0.8
     sep.BorderSizePixel = 0
     sep.Parent = section
-
-    return section
 end
 
--- Registry of refresh functions so applyConfig can sync the UI visually
--- after loading a saved config. Each entry is a function() that updates
--- the visual state of a toggle/slider without firing its callback.
-local UIRegistry = {}  -- list of {refresh=function(), getter=function()}
+local UIRegistry = {}
+local NamedRegistry = {}
+local function registerNamed(name, getter, setter)
+    NamedRegistry[name] = { getter = getter, setter = setter }
+end
 
--- Toggle row (game-style: 48px, backgroundGray 35%, stroke 1px primaryGray 72%)
-local function makeToggle(parent, text, state, callback, accentColor)
+local function makeToggle(parent, text, state, callback)
     local row = Instance.new("TextButton")
     row.Size = UDim2.new(1, 0, 0, 48)
     row.BackgroundColor3 = THEME.palette.backgroundGray
@@ -1080,7 +859,6 @@ local function makeToggle(parent, text, state, callback, accentColor)
     label.TextXAlignment = Enum.TextXAlignment.Left
     label.Parent = row
 
-    -- Toggle pill (right side)
     local pill = Instance.new("Frame")
     pill.Size = UDim2.new(0, 44, 0, 22)
     pill.Position = UDim2.new(1, -56, 0.5, -11)
@@ -1119,14 +897,9 @@ local function makeToggle(parent, text, state, callback, accentColor)
         end
     end
 
-    -- Register this toggle so applyConfig can sync it visually
-    -- The getter returns the current state, the setter updates state + UI without firing callback
     table.insert(UIRegistry, {
         getter = function() return state end,
-        setter = function(newVal)
-            state = newVal and true or false
-            update(false)
-        end,
+        setter = function(newVal) state = newVal and true or false update(false) end,
     })
 
     row.MouseButton1Click:Connect(function()
@@ -1136,7 +909,6 @@ local function makeToggle(parent, text, state, callback, accentColor)
     end)
 end
 
--- Sub-toggle (smaller, indented)
 local function makeSubToggle(parent, text, state, callback)
     local row = Instance.new("TextButton")
     row.Size = UDim2.new(1, 0, 0, 36)
@@ -1202,10 +974,7 @@ local function makeSubToggle(parent, text, state, callback)
 
     table.insert(UIRegistry, {
         getter = function() return state end,
-        setter = function(newVal)
-            state = newVal and true or false
-            update(false)
-        end,
+        setter = function(newVal) state = newVal and true or false update(false) end,
     })
 
     row.MouseButton1Click:Connect(function()
@@ -1215,9 +984,9 @@ local function makeSubToggle(parent, text, state, callback)
     end)
 end
 
--- Slider (game-style row with track at bottom)
-local function makeSlider(parent, text, min, max, value, callback, isFloat)
+local function makeSlider(parent, text, min, max, value, callback, isFloat, displayFn)
     isFloat = isFloat or false
+    displayFn = displayFn or function(v) return v end
     local row = Instance.new("Frame")
     row.Size = UDim2.new(1, 0, 0, 52)
     row.BackgroundColor3 = THEME.palette.backgroundGray
@@ -1258,7 +1027,6 @@ local function makeSlider(parent, text, min, max, value, callback, isFloat)
     valLbl.TextXAlignment = Enum.TextXAlignment.Right
     valLbl.Parent = row
 
-    -- Track
     local track = Instance.new("Frame")
     track.Size = UDim2.new(1, -24, 0, 4)
     track.Position = UDim2.new(0, 12, 0, 38)
@@ -1286,7 +1054,6 @@ local function makeSlider(parent, text, min, max, value, callback, isFloat)
     knobCorner.CornerRadius = UDim.new(0, 2)
     knobCorner.Parent = knob
 
-    -- Wider invisible hit area
     local hitArea = Instance.new("TextButton")
     hitArea.Size = UDim2.new(1, 0, 0, 22)
     hitArea.Position = UDim2.new(0, 0, 0.5, -11)
@@ -1301,17 +1068,14 @@ local function makeSlider(parent, text, min, max, value, callback, isFloat)
         pct = math.clamp(pct, 0, 1)
         fill.Size = UDim2.new(pct, 0, 1, 0)
         knob.Position = UDim2.new(pct, -7, 0.5, -7)
-        valLbl.Text = isFloat and string.format("%.2f", value) or tostring(math.floor(value))
+        local dispVal = displayFn(value)
+        valLbl.Text = isFloat and string.format("%.2f", dispVal) or tostring(math.floor(dispVal))
     end
     updateFill()
 
-    -- Register this slider so applyConfig can sync it visually
     table.insert(UIRegistry, {
         getter = function() return value end,
-        setter = function(newVal)
-            value = math.clamp(newVal, min, max)
-            updateFill()
-        end,
+        setter = function(newVal) value = math.clamp(newVal, min, max) updateFill() end,
     })
 
     local function setFromX(x)
@@ -1321,10 +1085,7 @@ local function makeSlider(parent, text, min, max, value, callback, isFloat)
         callback(value)
     end
 
-    local function beginDrag(x)
-        dragging = true
-        setFromX(x)
-    end
+    local function beginDrag(x) dragging = true setFromX(x) end
     local function beginFromMouse()
         dragging = true
         local mouseLoc = UserInputService:GetMouseLocation()
@@ -1335,25 +1096,24 @@ local function makeSlider(parent, text, min, max, value, callback, isFloat)
             beginDrag(input.Position.X)
         end
     end)
-    hitArea.MouseButton1Down:Connect(function()
-        beginFromMouse()
-    end)
+    hitArea.MouseButton1Down:Connect(function() beginFromMouse() end)
     knob.InputBegan:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
             beginDrag(input.Position.X)
         end
     end)
-    UserInputService.InputEnded:Connect(function(input)
+    trackConnection(UserInputService.InputEnded:Connect(function(input)
+        if not CleanupRegistry.loaded then return end
         if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then dragging = false end
-    end)
-    UserInputService.InputChanged:Connect(function(input)
+    end))
+    trackConnection(UserInputService.InputChanged:Connect(function(input)
+        if not CleanupRegistry.loaded then return end
         if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
             setFromX(input.Position.X)
         end
-    end)
+    end))
 end
 
--- Color swatch row (for ESP color preview)
 local function addColorSwatch(parent, text, color)
     local row = Instance.new("Frame")
     row.Size = UDim2.new(1, 0, 0, 28)
@@ -1388,8 +1148,7 @@ local function addColorSwatch(parent, text, color)
     swatchStroke.Parent = swatch
 end
 
--- Button group selector (e.g. for target part / mouse button)
-local function makeButtonGroup(parent, text, options, currentValue, callback)
+local function makeButtonGroup(parent, text, options, currentValue, callback, name)
     local row = Instance.new("Frame")
     row.Size = UDim2.new(1, 0, 0, 40)
     row.BackgroundTransparency = 1
@@ -1420,14 +1179,16 @@ local function makeButtonGroup(parent, text, options, currentValue, callback)
     layout.Parent = group
 
     local buttons = {}
-    local function selectIdx(idx)
+    local currentSel = currentValue
+    local function selectIdx(idx, fireCallback)
+        currentSel = options[idx].value
         for i, b in ipairs(buttons) do
             local isActive = (i == idx)
             b.BackgroundColor3 = isActive and THEME.palette.primaryGreen or THEME.palette.tabInactive
             b.BackgroundTransparency = 0.06
             b.TextColor3 = isActive and THEME.palette.backgroundGray or THEME.palette.muted
         end
-        callback(options[idx])
+        if fireCallback ~= false then callback(options[idx]) end
     end
     for i, opt in ipairs(options) do
         local b = Instance.new("TextButton")
@@ -1444,13 +1205,23 @@ local function makeButtonGroup(parent, text, options, currentValue, callback)
         local bc = Instance.new("UICorner")
         bc.CornerRadius = UDim.new(0, 0)
         bc.Parent = b
-        b.MouseButton1Click:Connect(function() selectIdx(i) end)
+        b.MouseButton1Click:Connect(function() selectIdx(i, true) end)
         buttons[i] = b
+    end
+
+    if name then
+        registerNamed(name,
+            function() return currentSel end,
+            function(newVal)
+                for i, opt in ipairs(options) do
+                    if opt.value == newVal then selectIdx(i, false) return end
+                end
+            end
+        )
     end
 end
 
--- Keybind picker (game-style: click to listen, then press any key)
-local function makeKeybind(parent, text, currentKey, callback)
+local function makeKeybind(parent, text, currentKey, callback, name)
     local row = Instance.new("Frame")
     row.Size = UDim2.new(1, 0, 0, 40)
     row.BackgroundTransparency = 1
@@ -1488,23 +1259,32 @@ local function makeKeybind(parent, text, currentKey, callback)
     bs.Transparency = 0.72
     bs.Parent = btn
 
+    local currentSel = currentKey
     local listening = false
-    btn.MouseButton1Click:Connect(function()
-        btn.Text = "..."
-        listening = true
-    end)
-    UserInputService.InputBegan:Connect(function(input)
+    btn.MouseButton1Click:Connect(function() btn.Text = "..." listening = true end)
+    trackConnection(UserInputService.InputBegan:Connect(function(input)
+        if not CleanupRegistry.loaded then return end
         if listening and input.KeyCode ~= Enum.KeyCode.Unknown and input.KeyCode ~= Enum.KeyCode.Insert then
+            currentSel = input.KeyCode
             callback(input.KeyCode)
             btn.Text = input.KeyCode.Name
             listening = false
         end
-    end)
+    end))
+
+    if name then
+        registerNamed(name,
+            function() return currentSel end,
+            function(newKey)
+                if newKey and typeof(newKey) == "EnumItem" then
+                    currentSel = newKey
+                    btn.Text = newKey.Name
+                end
+            end
+        )
+    end
 end
 
---======================================================
--- UI: simple button (not toggle)
---======================================================
 local function makeButton(parent, text, callback, isDanger)
     local row = Instance.new("TextButton")
     row.Size = UDim2.new(1, 0, 0, 40)
@@ -1529,25 +1309,13 @@ local function makeButton(parent, text, callback, isDanger)
     stroke.Transparency = 0.72
     stroke.Parent = row
 
-    -- Hover effect
-    row.MouseEnter:Connect(function()
-        stroke.Transparency = 0
-    end)
-    row.MouseLeave:Connect(function()
-        stroke.Transparency = 0.72
-    end)
-
-    row.MouseButton1Click:Connect(function()
-        callback()
-    end)
-    return row
+    row.MouseEnter:Connect(function() stroke.Transparency = 0 end)
+    row.MouseLeave:Connect(function() stroke.Transparency = 0.72 end)
+    row.MouseButton1Click:Connect(function() callback() end)
 end
 
---======================================================
--- UI: confirmation popup (modal)
---======================================================
+-- Popup
 local PopupOverlay = Instance.new("TextButton")
-PopupOverlay.Name = "PopupOverlay"
 PopupOverlay.Size = UDim2.fromScale(1, 1)
 PopupOverlay.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
 PopupOverlay.BackgroundTransparency = 0.5
@@ -1556,11 +1324,8 @@ PopupOverlay.ZIndex = 100
 PopupOverlay.AutoButtonColor = false
 PopupOverlay.Text = ""
 PopupOverlay.Parent = Main
--- The overlay itself absorbs clicks so no button behind it can be clicked
--- while the popup is open.
 
 local PopupBox = Instance.new("Frame")
-PopupBox.Name = "PopupBox"
 PopupBox.Size = UDim2.fromOffset(360, 0)
 PopupBox.Position = UDim2.fromScale(0.5, 0.5)
 PopupBox.AnchorPoint = Vector2.new(0.5, 0.5)
@@ -1596,7 +1361,7 @@ popupLayout.Parent = PopupBox
 local PopupTitle = Instance.new("TextLabel")
 PopupTitle.Size = UDim2.new(1, 0, 0, 24)
 PopupTitle.BackgroundTransparency = 1
-PopupTitle.Text = "Confirm"
+PopupTitle.Text = "Confirmar"
 PopupTitle.TextColor3 = THEME.palette.primaryGray
 PopupTitle.FontFace = THEME.font.bold
 PopupTitle.TextSize = 16
@@ -1626,7 +1391,7 @@ PopupInput.BorderSizePixel = 0
 PopupInput.FontFace = THEME.font.regular
 PopupInput.TextSize = 13
 PopupInput.TextColor3 = THEME.palette.text
-PopupInput.PlaceholderText = "Type a name..."
+PopupInput.PlaceholderText = "Digite um nome..."
 PopupInput.PlaceholderColor3 = THEME.palette.muted
 PopupInput.Text = ""
 PopupInput.LayoutOrder = 3
@@ -1662,7 +1427,7 @@ PopupYesBtn.BorderSizePixel = 0
 PopupYesBtn.FontFace = THEME.font.semiBold
 PopupYesBtn.TextSize = 13
 PopupYesBtn.TextColor3 = THEME.palette.backgroundGray
-PopupYesBtn.Text = "Yes"
+PopupYesBtn.Text = "Sim"
 PopupYesBtn.Parent = PopupButtonRow
 local popupYesCorner = Instance.new("UICorner")
 popupYesCorner.CornerRadius = UDim.new(0, 1)
@@ -1676,29 +1441,23 @@ PopupNoBtn.BorderSizePixel = 0
 PopupNoBtn.FontFace = THEME.font.semiBold
 PopupNoBtn.TextSize = 13
 PopupNoBtn.TextColor3 = THEME.palette.primaryGray
-PopupNoBtn.Text = "No"
+PopupNoBtn.Text = "Nao"
 PopupNoBtn.Parent = PopupButtonRow
 local popupNoCorner = Instance.new("UICorner")
 popupNoCorner.CornerRadius = UDim.new(0, 1)
 popupNoCorner.Parent = PopupNoBtn
 
--- External connection table (Roblox Instances don't allow custom props)
 local popupConns = { yes = nil, no = nil }
-
 local function showPopup(title, message, onYes, opts)
     opts = opts or {}
-    PopupTitle.Text = title or "Confirm"
+    PopupTitle.Text = title or "Confirmar"
     PopupMessage.Text = message or ""
     PopupInput.Visible = opts.showInput or false
     PopupInput.Text = opts.defaultInput or ""
-    PopupYesBtn.Text = opts.yesText or "Yes"
-    PopupNoBtn.Text = opts.noText or "No"
+    PopupYesBtn.Text = opts.yesText or "Sim"
+    PopupNoBtn.Text = opts.noText or "Nao"
     PopupOverlay.Visible = true
-    -- Reset focus
     if opts.showInput then PopupInput:CaptureFocus() end
-
-    -- Disconnect previous handlers using an external table (Roblox Instances
-    -- don't allow custom properties like _conn)
     if popupConns.yes then popupConns.yes:Disconnect() popupConns.yes = nil end
     if popupConns.no then popupConns.no:Disconnect() popupConns.no = nil end
     popupConns.yes = PopupYesBtn.MouseButton1Click:Connect(function()
@@ -1710,128 +1469,94 @@ local function showPopup(title, message, onYes, opts)
     end)
 end
 
-local function hidePopup()
-    PopupOverlay.Visible = false
-end
-
---======================================================
 -- Build ESP column
---======================================================
 local function buildESPSection(parent, name, cfg)
     addSection(parent, name:upper(), cfg.Color)
-    addColorSwatch(parent, "Color", cfg.Color)
-    makeToggle(parent, "Enabled", cfg.Enabled, function(v) cfg.Enabled = v end)
-    makeSubToggle(parent, "Name", cfg.Name, function(v) cfg.Name = v end)
-    makeSubToggle(parent, "Distance", cfg.Distance, function(v) cfg.Distance = v end)
+    addColorSwatch(parent, "Cor", cfg.Color)
+    makeToggle(parent, "Ativado", cfg.Enabled, function(v) cfg.Enabled = v end)
+    makeSubToggle(parent, "Nome", cfg.Name, function(v) cfg.Name = v end)
+    makeSubToggle(parent, "Distancia", cfg.Distance, function(v) cfg.Distance = v end)
     makeSubToggle(parent, "Box", cfg.Box, function(v) cfg.Box = v end)
     makeSubToggle(parent, "Tracer", cfg.Tracer, function(v) cfg.Tracer = v end)
-    if cfg.Health ~= nil then
-        makeSubToggle(parent, "Health", cfg.Health, function(v) cfg.Health = v end)
-    end
-    if cfg.Skeleton ~= nil then
-        makeSubToggle(parent, "Skeleton", cfg.Skeleton, function(v) cfg.Skeleton = v end)
-    end
-    makeSlider(parent, "Range", 50, 5000, cfg.MaxDistance, function(v) cfg.MaxDistance = math.floor(v) end)
+    if cfg.Health ~= nil then makeSubToggle(parent, "Vida", cfg.Health, function(v) cfg.Health = v end) end
+    if cfg.Skeleton ~= nil then makeSubToggle(parent, "Esqueleto", cfg.Skeleton, function(v) cfg.Skeleton = v end) end
+    makeSlider(parent, "Alcance", 50, 5000 / StudsToMeters, cfg.MaxDistance, function(v) cfg.MaxDistance = math.floor(v) end, false, function(v) return math.floor(v * StudsToMeters + 0.5) end)
 end
 
-buildESPSection(ESPScroll, "Players",       Config.Players)
-buildESPSection(ESPScroll, "Corpses",       Config.Corpses)
-buildESPSection(ESPScroll, "Vehicles",      Config.Vehicles)
-buildESPSection(ESPScroll, "Loot Vehicles", Config.LootVeh)
-buildESPSection(ESPScroll, "Items",         Config.Items)
+buildESPSection(ESPScroll, "Players", Config.Players)
+buildESPSection(ESPScroll, "Corpses", Config.Corpses)
+buildESPSection(ESPScroll, "Vehicles", Config.Vehicles)
+buildESPSection(ESPScroll, "Items", Config.Items)
 
--- Hint at the bottom of ESP column
 local espHint = Instance.new("TextLabel")
 espHint.Size = UDim2.new(1, 0, 0, 20)
 espHint.BackgroundTransparency = 1
-espHint.Text = "INSERT to toggle menu"
+espHint.Text = "INSERT para abrir/fechar"
 espHint.TextColor3 = THEME.palette.muted
 espHint.FontFace = THEME.font.regular
 espHint.TextSize = 12
 espHint.LayoutOrder = nextOrder()
 espHint.Parent = ESPScroll
 
---======================================================
 -- Build Aimbot column
---======================================================
 addSection(AimScroll, "AIMBOT", THEME.palette.primaryGreen)
-makeToggle(AimScroll, "Enabled", Config.Aimbot.Enabled, function(v) Config.Aimbot.Enabled = v end)
+makeToggle(AimScroll, "Ativado", Config.Aimbot.Enabled, function(v) Config.Aimbot.Enabled = v end)
 makeSubToggle(AimScroll, "Wall Check", Config.Aimbot.WallCheck, function(v) Config.Aimbot.WallCheck = v end)
 makeSubToggle(AimScroll, "Squad Check", Config.Aimbot.SquadCheck, function(v) Config.Aimbot.SquadCheck = v end)
-makeSubToggle(AimScroll, "Show FOV Circle", Config.Aimbot.ShowFOV, function(v) Config.Aimbot.ShowFOV = v end)
-makeSubToggle(AimScroll, "Use Mouse Input", Config.Aimbot.UseMouseInput, function(v) Config.Aimbot.UseMouseInput = v end)
+makeSubToggle(AimScroll, "Mostrar FOV", Config.Aimbot.ShowFOV, function(v) Config.Aimbot.ShowFOV = v end)
+makeSubToggle(AimScroll, "Usar Mouse", Config.Aimbot.UseMouseInput, function(v) Config.Aimbot.UseMouseInput = v end)
 
-makeKeybind(AimScroll, "Aim Key", Config.Aimbot.AimKey, function(k) Config.Aimbot.AimKey = k end)
+makeKeybind(AimScroll, "Tecla de Mira", Config.Aimbot.AimKey, function(k) Config.Aimbot.AimKey = k end, "AimKey")
 
-makeButtonGroup(AimScroll, "Mouse Button", {
+makeButtonGroup(AimScroll, "Botao Mouse", {
     {label="LMB", value=Enum.UserInputType.MouseButton1},
     {label="RMB", value=Enum.UserInputType.MouseButton2},
     {label="MMB", value=Enum.UserInputType.MouseButton3},
-}, Config.Aimbot.MouseButton, function(opt) Config.Aimbot.MouseButton = opt.value end)
+}, Config.Aimbot.MouseButton, function(opt) Config.Aimbot.MouseButton = opt.value end, "MouseButton")
 
 makeSlider(AimScroll, "FOV", 20, 500, Config.Aimbot.FOV, function(v) Config.Aimbot.FOV = math.floor(v) end)
-makeSlider(AimScroll, "Distance", 50, 5000, Config.Aimbot.MaxDistance, function(v) Config.Aimbot.MaxDistance = math.floor(v) end)
-makeSlider(AimScroll, "Smoothness", 0.05, 1, Config.Aimbot.Smoothness, function(v) Config.Aimbot.Smoothness = v end, true)
+makeSlider(AimScroll, "Distancia", 50, 5000 / StudsToMeters, Config.Aimbot.MaxDistance, function(v) Config.Aimbot.MaxDistance = math.floor(v) end, false, function(v) return math.floor(v * StudsToMeters + 0.5) end)
+makeSlider(AimScroll, "Suavidade", 0.05, 1, Config.Aimbot.Smoothness, function(v) Config.Aimbot.Smoothness = v end, true)
 
-addSection(AimScroll, "TARGET PART", THEME.palette.primaryGreen)
-makeButtonGroup(AimScroll, "Part", {
-    {label="HRP",  value="HumanoidRootPart"},
+addSection(AimScroll, "PARTE ALVO", THEME.palette.primaryGreen)
+makeButtonGroup(AimScroll, "Parte", {
+    {label="HRP", value="HumanoidRootPart"},
     {label="HEAD", value="Head"},
-    {label="TORSO",value="Torso"},
-    {label="UPR",  value="UpperTorso"},
-}, Config.Aimbot.TargetPart, function(opt) Config.Aimbot.TargetPart = opt.value end)
+    {label="TORSO", value="Torso"},
+    {label="UPR", value="UpperTorso"},
+}, Config.Aimbot.TargetPart, function(opt) Config.Aimbot.TargetPart = opt.value end, "TargetPart")
 
--- Hint at the bottom of Aimbot column
 local aimHint = Instance.new("TextLabel")
 aimHint.Size = UDim2.new(1, 0, 0, 30)
 aimHint.BackgroundTransparency = 1
-aimHint.Text = "Hold Aim Key or Mouse Button to aim\nSquad allies shown green & skipped by aimbot\nINSERT to toggle menu"
+aimHint.Text = "Segure a tecla ou botao do mouse para mirar\nAliados sao verdes e ignorados pelo aimbot\nINSERT para abrir/fechar"
 aimHint.TextColor3 = THEME.palette.muted
 aimHint.FontFace = THEME.font.regular
 aimHint.TextSize = 12
 aimHint.LayoutOrder = nextOrder()
 aimHint.Parent = AimScroll
 
---======================================================
--- Misc column (Fullbright / No Fog / No Rain)
---======================================================
+-- Misc column
 local Lighting = game:GetService("Lighting")
 
--- Find Atmosphere child (game uses "Cold Atmosphere")
 local function findAtmosphere()
     local at = Lighting:FindFirstChild("Cold Atmosphere")
-    if not at then
-        -- Try generic Atmosphere too
-        at = Lighting:FindFirstChildOfClass("Atmosphere")
-    end
+    if not at then at = Lighting:FindFirstChildOfClass("Atmosphere") end
     return at
 end
 
 local originalLighting = {
-    Brightness = Lighting.Brightness,
-    ClockTime = Lighting.ClockTime,
-    FogEnd = Lighting.FogEnd,
-    FogStart = Lighting.FogStart,
-    FogColor = Lighting.FogColor,
-    Ambient = Lighting.Ambient,
-    OutdoorAmbient = Lighting.OutdoorAmbient,
-    ColorShift_Bottom = Lighting.ColorShift_Bottom,
-    ColorShift_Top = Lighting.ColorShift_Top,
-    GlobalShadows = Lighting.GlobalShadows,
-    ExposureCompensation = Lighting.ExposureCompensation,
-    -- Atmosphere props (captured lazily)
-    Atmosphere = nil,
-    -- Rain original state
-    RainParent = nil,
-    RainEnabled = nil,
+    Brightness = Lighting.Brightness, ClockTime = Lighting.ClockTime,
+    FogEnd = Lighting.FogEnd, FogStart = Lighting.FogStart, FogColor = Lighting.FogColor,
+    Ambient = Lighting.Ambient, OutdoorAmbient = Lighting.OutdoorAmbient,
+    ColorShift_Bottom = Lighting.ColorShift_Bottom, ColorShift_Top = Lighting.ColorShift_Top,
+    GlobalShadows = Lighting.GlobalShadows, ExposureCompensation = Lighting.ExposureCompensation,
+    Atmosphere = nil, RainParent = nil, RainEnabled = nil, SplashTransparency = nil, SplashEnabled = nil,
 }
 
 local fullbrightConnection = nil
-
 local function applyFullbright()
     local strength = Config.Misc.FullbrightStrength
-    -- Map 0..1 to: brightness 1..3, ambient gray 60..200, exposure 0..0.8
-    -- NOTE: We DO NOT touch ClockTime - keep the time of day intact.
     local brightness = 1 + strength * 2
     local gray = math.floor(60 + strength * 140)
     local ambient = Color3.fromRGB(gray, gray, gray)
@@ -1848,15 +1573,10 @@ local function setFullbright(enabled)
     if enabled then
         applyFullbright()
         if not fullbrightConnection then
-            fullbrightConnection = RunService.RenderStepped:Connect(function()
-                applyFullbright()
-            end)
+            fullbrightConnection = RunService.RenderStepped:Connect(function() applyFullbright() end)
         end
     else
-        if fullbrightConnection then
-            fullbrightConnection:Disconnect()
-            fullbrightConnection = nil
-        end
+        if fullbrightConnection then fullbrightConnection:Disconnect() fullbrightConnection = nil end
         pcall(function() Lighting.Brightness = originalLighting.Brightness end)
         pcall(function() Lighting.Ambient = originalLighting.Ambient end)
         pcall(function() Lighting.OutdoorAmbient = originalLighting.OutdoorAmbient end)
@@ -1870,11 +1590,8 @@ local nofogConnection = nil
 local nofogPropertyConnections = {}
 
 local function applyNoFog()
-    -- Push fog away on Lighting
     pcall(function() Lighting.FogEnd = 1e9 end)
     pcall(function() Lighting.FogStart = 1e9 end)
-    -- Disable Atmosphere if present (Future lighting fog)
-    -- Find fresh each frame in case the game replaces it
     local at = findAtmosphere()
     if at then
         pcall(function() at.Haze = 0 end)
@@ -1885,99 +1602,62 @@ local function applyNoFog()
     end
 end
 
--- Hook property changes so we react INSTANTLY when the game restores the fog
 local function hookAtmosphere(at)
     if not at then return end
     local function connectProp(prop, zeroVal)
         local conn = at:GetPropertyChangedSignal(prop):Connect(function()
-            if Config.Misc.NoFog then
-                pcall(function() at[prop] = zeroVal end)
-            end
+            if Config.Misc.NoFog then pcall(function() at[prop] = zeroVal end) end
         end)
         table.insert(nofogPropertyConnections, conn)
     end
-    connectProp("Haze", 0)
-    connectProp("Glare", 0)
-    connectProp("Decay", Color3.fromRGB(0,0,0))
-    connectProp("Density", 0)
-    connectProp("Color", Color3.fromRGB(0,0,0))
+    connectProp("Haze", 0) connectProp("Glare", 0) connectProp("Decay", Color3.fromRGB(0,0,0))
+    connectProp("Density", 0) connectProp("Color", Color3.fromRGB(0,0,0))
 end
 
 local function hookLightingFog()
     local function connectProp(prop, zeroVal)
         local conn = Lighting:GetPropertyChangedSignal(prop):Connect(function()
-            if Config.Misc.NoFog then
-                pcall(function() Lighting[prop] = zeroVal end)
-            end
+            if Config.Misc.NoFog then pcall(function() Lighting[prop] = zeroVal end) end
         end)
         table.insert(nofogPropertyConnections, conn)
     end
-    connectProp("FogEnd", 1e9)
-    connectProp("FogStart", 1e9)
+    connectProp("FogEnd", 1e9) connectProp("FogStart", 1e9)
 end
 
--- Watch for new atmospheres being added (game may recreate them)
 local atmoChildAddedConn = nil
 
 local function setNoFog(enabled)
     if enabled then
-        -- Clear previous connections
         for _, c in ipairs(nofogPropertyConnections) do c:Disconnect() end
         nofogPropertyConnections = {}
-        -- Capture Atmosphere original values on enable
         local at = findAtmosphere()
         if at and not originalLighting.Atmosphere then
-            originalLighting.Atmosphere = {
-                Haze = at.Haze,
-                Glare = at.Glare,
-                Decay = at.Decay,
-                Density = at.Density,
-                Color = at.Color,
-            }
+            originalLighting.Atmosphere = { Haze = at.Haze, Glare = at.Glare, Decay = at.Decay, Density = at.Density, Color = at.Color }
         end
         applyNoFog()
-        -- Hook property signals for instant reaction
         hookAtmosphere(at)
         hookLightingFog()
-        -- Watch for game replacing/adding new atmosphere
         if not atmoChildAddedConn then
             atmoChildAddedConn = Lighting.ChildAdded:Connect(function(child)
                 if child:IsA("Atmosphere") and Config.Misc.NoFog then
-                    -- Don't capture this new one (it's the game's restoration);
-                    -- just zero it and hook its signals
-                    task.wait(0.05)  -- let it settle
-                    pcall(function()
-                        child.Haze = 0
-                        child.Glare = 0
-                        child.Decay = Color3.fromRGB(0,0,0)
-                        child.Density = 0
-                        child.Color = Color3.fromRGB(0,0,0)
-                    end)
+                    task.wait(0.05)
+                    pcall(function() child.Haze = 0 child.Glare = 0 child.Decay = Color3.fromRGB(0,0,0) child.Density = 0 child.Color = Color3.fromRGB(0,0,0) end)
                     hookAtmosphere(child)
                 end
             end)
         end
-        -- High-priority render step (after most game logic)
         if not nofogConnection then
-            local ok = pcall(function()
-                RunService:BindToRenderStep("NoFogApply", Enum.RenderPriority.Last.Value, applyNoFog)
-            end)
-            if not ok then
-                nofogConnection = RunService.RenderStepped:Connect(applyNoFog)
-            end
+            local ok = pcall(function() RunService:BindToRenderStep("NoFogApply", Enum.RenderPriority.Last.Value, applyNoFog) end)
+            if not ok then nofogConnection = RunService.RenderStepped:Connect(applyNoFog) end
         end
     else
-        if nofogConnection then
-            nofogConnection:Disconnect()
-            nofogConnection = nil
-        end
+        if nofogConnection then nofogConnection:Disconnect() nofogConnection = nil end
         pcall(function() RunService:UnbindFromRenderStep("NoFogApply") end)
         for _, c in ipairs(nofogPropertyConnections) do c:Disconnect() end
         nofogPropertyConnections = {}
         pcall(function() Lighting.FogEnd = originalLighting.FogEnd end)
         pcall(function() Lighting.FogStart = originalLighting.FogStart end)
         if originalLighting.Atmosphere then
-            -- Restore on the CURRENT atmosphere (might be a different instance if game recreated)
             local at = findAtmosphere()
             if at then
                 pcall(function() at.Haze = originalLighting.Atmosphere.Haze end)
@@ -1998,150 +1678,114 @@ local function findRain()
     return weather:FindFirstChild("Rain")
 end
 
+local function findWeatherSplash()
+    local terrain = workspace:FindFirstChild("Terrain")
+    if not terrain then return nil end
+    return terrain:FindFirstChild("WeatherSplash")
+end
+
+local startNoRainLoop
 local function setNoRain(enabled)
     local rain = findRain()
-    if not rain then return end
     if enabled then
-        -- Capture original parent and Enabled state
-        if not originalLighting.RainParent then
+        if rain and not originalLighting.RainParent then
             originalLighting.RainParent = rain.Parent
             pcall(function() originalLighting.RainEnabled = rain.Enabled end)
         end
-        -- Disable the rain particles
-        pcall(function() rain.Enabled = false end)
-        -- Also try moving it out of the camera so its Update doesn't re-enable
-        pcall(function()
-            -- Set rate to 0 if it's a ParticleEmitter
-            if rain:IsA("ParticleEmitter") then
-                rain.Rate = 0
-            end
-        end)
+        if rain then
+            pcall(function() rain.Enabled = false end)
+            if rain:IsA("ParticleEmitter") then pcall(function() rain.Rate = 0 end) end
+        end
+        local splash = findWeatherSplash()
+        if splash then
+            pcall(function() splash.Transparency = 1 end)
+            pcall(function() splash.Enabled = false end)
+        end
+        startNoRainLoop()
     else
-        -- Restore
-        pcall(function() rain.Enabled = originalLighting.RainEnabled end)
-        if originalLighting.RainParent and rain.Parent ~= originalLighting.RainParent then
-            pcall(function() rain.Parent = originalLighting.RainParent end)
+        if rain then
+            pcall(function() rain.Enabled = originalLighting.RainEnabled end)
+            if originalLighting.RainParent and rain.Parent ~= originalLighting.RainParent then
+                pcall(function() rain.Parent = originalLighting.RainParent end)
+            end
+        end
+        local splash = findWeatherSplash()
+        if splash then
+            pcall(function() splash.Transparency = 0 end)
+            pcall(function() splash.Enabled = true end)
         end
     end
 end
 
--- Re-apply No Rain each frame (game may re-enable)
 local norainConnection = nil
-local function startNoRainLoop()
+startNoRainLoop = function()
     if norainConnection then return end
     norainConnection = RunService.RenderStepped:Connect(function()
         if Config.Misc.NoRain then
             local rain = findRain()
             if rain then
                 pcall(function() rain.Enabled = false end)
-                if rain:IsA("ParticleEmitter") then
-                    pcall(function() rain.Rate = 0 end)
-                end
+                if rain:IsA("ParticleEmitter") then pcall(function() rain.Rate = 0 end) end
+            end
+            local splash = findWeatherSplash()
+            if splash then
+                pcall(function() splash.Transparency = 1 end)
+                pcall(function() splash.Enabled = false end)
             end
         end
     end)
 end
 
 addSection(MiscScroll, "VISUAL", THEME.palette.primaryGreen)
-makeToggle(MiscScroll, "Fullbright", Config.Misc.Fullbright, function(v)
-    Config.Misc.Fullbright = v
-    setFullbright(v)
-end)
-makeSlider(MiscScroll, "FB Strength", 0, 1, Config.Misc.FullbrightStrength, function(v)
-    Config.Misc.FullbrightStrength = v
-    if Config.Misc.Fullbright then applyFullbright() end
-end, true)
-makeToggle(MiscScroll, "No Fog", Config.Misc.NoFog, function(v)
-    Config.Misc.NoFog = v
-    setNoFog(v)
-end)
-makeToggle(MiscScroll, "No Rain", Config.Misc.NoRain, function(v)
-    Config.Misc.NoRain = v
-    setNoRain(v)
-    if v then startNoRainLoop() end
-end)
+makeToggle(MiscScroll, "Fullbright", Config.Misc.Fullbright, function(v) Config.Misc.Fullbright = v setFullbright(v) end)
+makeSlider(MiscScroll, "Forca FB", 0, 1, Config.Misc.FullbrightStrength, function(v) Config.Misc.FullbrightStrength = v if Config.Misc.Fullbright then applyFullbright() end end, true)
+makeToggle(MiscScroll, "Sem Neblina", Config.Misc.NoFog, function(v) Config.Misc.NoFog = v setNoFog(v) end)
+makeToggle(MiscScroll, "Sem Chuva", Config.Misc.NoRain, function(v) Config.Misc.NoRain = v setNoRain(v) end)
 
 local miscHint = Instance.new("TextLabel")
 miscHint.Size = UDim2.new(1, 0, 0, 30)
 miscHint.BackgroundTransparency = 1
-miscHint.Text = "Reversible - toggle off to restore\nINSERT to toggle menu"
+miscHint.Text = "Reversivel - desligue para restaurar\nINSERT para abrir/fechar"
 miscHint.TextColor3 = THEME.palette.muted
 miscHint.FontFace = THEME.font.regular
 miscHint.TextSize = 12
 miscHint.LayoutOrder = nextOrder()
 miscHint.Parent = MiscScroll
 
---======================================================
--- Rejoin / Serverhop buttons (with confirmation popup)
---======================================================
+-- Rejoin / Serverhop
 local TeleportService = game:GetService("TeleportService")
 local HttpService = game:GetService("HttpService")
 
-addSection(MiscScroll, "SERVER", THEME.palette.primaryGreen)
-
-makeButton(MiscScroll, "Rejoin", function()
-    showPopup(
-        "Rejoin",
-        "Rejoin the same server?\nYou will be teleported back to this server.",
-        function()
-            pcall(function()
-                TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer)
-            end)
-        end,
-        nil
-    )
+addSection(MiscScroll, "SERVIDOR", THEME.palette.primaryGreen)
+makeButton(MiscScroll, "Reentrar", function()
+    showPopup("Reentrar", "Reentrar no mesmo servidor?\nVoce sera teleportado de volta.", function()
+        pcall(function() TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer) end)
+    end)
 end)
-
-makeButton(MiscScroll, "Serverhop", function()
-    showPopup(
-        "Serverhop",
-        "Hop to a different server of this game?\nYou will be teleported to a random public server.",
-        function()
-            -- Use Roblox public API to list public servers, pick a random one (not current)
-            pcall(function()
-                local placeId = game.PlaceId
-                local currentJobId = game.JobId
-                local url = "https://games.roblox.com/v1/games/" .. placeId .. "/servers/Public?limit=100"
-                local success, response = pcall(function()
-                    return game:GetService("HttpService"):JSONDecode(game:HttpGetAsync(url))
-                end)
-                if not success or not response or not response.data then
-                    return
-                end
-                -- Filter out the current server and full servers
-                local candidates = {}
-                for _, s in ipairs(response.data) do
-                    if s.id ~= currentJobId and s.playing < s.maxPlayers then
-                        table.insert(candidates, s.id)
-                    end
-                end
-                if #candidates == 0 then
-                    return
-                end
-                -- Pick a random candidate
-                local target = candidates[math.random(1, #candidates)]
-                TeleportService:TeleportToPlaceInstance(placeId, target, LocalPlayer)
-            end)
-        end,
-        nil
-    )
+makeButton(MiscScroll, "Trocar Servidor", function()
+    showPopup("Trocar Servidor", "Ir para outro servidor?\nVoce sera teleportado para um servidor publico aleatorio.", function()
+        pcall(function()
+            local placeId = game.PlaceId
+            local currentJobId = game.JobId
+            local url = "https://games.roblox.com/v1/games/" .. placeId .. "/servers/Public?limit=100"
+            local success, response = pcall(function() return HttpService:JSONDecode(game:HttpGetAsync(url)) end)
+            if not success or not response or not response.data then return end
+            local candidates = {}
+            for _, s in ipairs(response.data) do
+                if s.id ~= currentJobId and s.playing < s.maxPlayers then table.insert(candidates, s.id) end
+            end
+            if #candidates == 0 then return end
+            local target = candidates[math.random(1, #candidates)]
+            TeleportService:TeleportToPlaceInstance(placeId, target, LocalPlayer)
+        end)
+    end)
 end, true)
 
---======================================================
--- Radar ESP (overlays player dots on the in-game map)
---======================================================
--- The game's MapController projects world coords to map coords using:
---   x = (Position.X - bounds.minX) / bounds.spanX   (0..1)
---   y = (Position.Z - bounds.minZ) / bounds.spanZ   (0..1)
--- Then places markers inside PlayerGui.MapUI.Map with UDim2.fromScale(x, y).
--- We do exactly the same to overlay player dots when the map is open.
-
+-- Radar ESP
 local mapConfig = nil
-pcall(function()
-    mapConfig = require(game:GetService("ReplicatedStorage").Shared.common.config.mapConfig)
-end)
+pcall(function() mapConfig = require(game:GetService("ReplicatedStorage").Shared.common.config.mapConfig) end)
 
-local radarDots = {}        -- player name -> {Dot=Frame, Label=TextLabel}
+local radarDots = {}
 local radarConnection = nil
 
 local function findMapFrame()
@@ -2149,8 +1793,6 @@ local function findMapFrame()
     if not pg then return nil end
     local mapUI = pg:FindFirstChild("MapUI")
     if not mapUI or not mapUI:IsA("ScreenGui") then return nil end
-    -- The game disables u111.Enabled when closed, but the Map frame (u113) also
-    -- gets .Visible toggled. Either signal works; we check the Map frame.
     local map = mapUI:FindFirstChild("Map")
     if not map or not map:IsA("Frame") then return nil end
     return map
@@ -2158,11 +1800,9 @@ end
 
 local function getRadarDot(name, parent)
     local entry = radarDots[name]
-    -- If dot was destroyed or parent changed, recreate
     if entry and (not entry.Dot or not entry.Dot.Parent or entry.Dot.Parent ~= parent) then
         if entry.Dot and entry.Dot.Parent then entry.Dot:Destroy() end
-        entry = nil
-        radarDots[name] = nil
+        entry = nil radarDots[name] = nil
     end
     if not entry then
         local dot = Instance.new("Frame")
@@ -2171,7 +1811,7 @@ local function getRadarDot(name, parent)
         dot.Size = UDim2.fromOffset(7, 7)
         dot.BackgroundColor3 = Color3.fromRGB(255, 80, 80)
         dot.BorderSizePixel = 0
-        dot.ZIndex = 6  -- above map image (Z=2), below player marker (Z=6)
+        dot.ZIndex = 6
         local corner = Instance.new("UICorner")
         corner.CornerRadius = UDim.new(1, 0)
         corner.Parent = dot
@@ -2180,7 +1820,6 @@ local function getRadarDot(name, parent)
         stroke.Thickness = 1
         stroke.Transparency = 0.1
         stroke.Parent = dot
-
         local label = Instance.new("TextLabel")
         label.Name = "Name"
         label.AnchorPoint = Vector2.new(0.5, 0)
@@ -2195,7 +1834,6 @@ local function getRadarDot(name, parent)
         label.Text = name
         label.ZIndex = 7
         label.Parent = dot
-
         dot.Parent = parent
         entry = {Dot = dot, Label = label}
         radarDots[name] = entry
@@ -2215,10 +1853,8 @@ local function updateRadar()
     if not mapConfig then return end
     local mapFrame = findMapFrame()
     if not mapFrame or not mapFrame.Visible then return end
-
     local bounds = mapConfig.bounds
     if not bounds then return end
-
     local seen = {}
     local playersFolder = workspace:FindFirstChild("Players")
     if playersFolder then
@@ -2228,11 +1864,9 @@ local function updateRadar()
                 local hum = m:FindFirstChildOfClass("Humanoid")
                 if hrp and hrp:IsA("BasePart") and (not hum or hum.Health > 0) then
                     local entry = getRadarDot(m.Name, mapFrame)
-                    -- Project to map coords (same formula the game uses)
                     local x = math.clamp((hrp.Position.X - bounds.minX) / bounds.spanX, 0, 1)
                     local y = math.clamp((hrp.Position.Z - bounds.minZ) / bounds.spanZ, 0, 1)
                     entry.Dot.Position = UDim2.fromScale(x, y)
-                    -- Green for squad ally, red for others
                     local ally, allyColor = isAlly(m)
                     if ally then
                         entry.Dot.BackgroundColor3 = allyColor or Config.Squad.AllyColor
@@ -2245,50 +1879,27 @@ local function updateRadar()
             end
         end
     end
-
-    -- Hide dots for players no longer present
     for k, v in pairs(radarDots) do
-        if not seen[k] and v.Dot and v.Dot.Parent then
-            v.Dot.Visible = false
-        end
+        if not seen[k] and v.Dot and v.Dot.Parent then v.Dot.Visible = false end
     end
 end
 
 local function setRadar(enabled)
     if enabled then
         if not radarConnection then
-            radarConnection = RunService.RenderStepped:Connect(function()
-                pcall(updateRadar)
-            end)
+            radarConnection = RunService.RenderStepped:Connect(function() pcall(updateRadar) end)
         end
     else
-        if radarConnection then
-            radarConnection:Disconnect()
-            radarConnection = nil
-        end
+        if radarConnection then radarConnection:Disconnect() radarConnection = nil end
         clearRadarDots()
     end
 end
 
-makeToggle(MiscScroll, "Radar (map dots)", Config.Misc.Radar, function(v)
-    Config.Misc.Radar = v
-    setRadar(v)
-end)
+makeToggle(MiscScroll, "Radar (pontos no mapa)", Config.Misc.Radar, function(v) Config.Misc.Radar = v setRadar(v) end)
 
---======================================================
--- Minimap (when full map is closed)
--- Shows a small circular minimap with adjustable zoom, size, opacity.
--- Uses the same mapConfig image + projection formula as the game's MapController.
--- Also overlays player dots (red / green for allies) when radar ESP is enabled.
---======================================================
-
-local MinimapGui = nil       -- ScreenGui
-local MinimapRoot = nil      -- main Frame (square)
-local MinimapClip = nil      -- clipping Frame (circular via UICorner)
-local MinimapRotateFrame = nil  -- rotation pivot frame (sits at clip center)
-local MinimapImage = nil     -- ImageLabel of map texture
-local MinimapPlayerDot = nil -- "you" arrow
-local MinimapDots = {}       -- name -> {Dot=Frame}
+-- Minimap
+local MinimapGui, MinimapRoot, MinimapClip, MinimapRotateFrame, MinimapImage, MinimapPlayerDot = nil, nil, nil, nil, nil, nil
+local MinimapDots = {}
 local MinimapConn = nil
 
 local function buildMinimap()
@@ -2303,7 +1914,6 @@ local function buildMinimap()
 
     MinimapRoot = Instance.new("Frame")
     MinimapRoot.Name = "Minimap"
-    MinimapRoot.AnchorPoint = Vector2.new(0, 0)
     MinimapRoot.Position = UDim2.new(0, 16, 0, 16)
     MinimapRoot.Size = UDim2.fromOffset(Config.Misc.MinimapSize, Config.Misc.MinimapSize)
     MinimapRoot.BackgroundColor3 = Color3.fromRGB(20, 22, 18)
@@ -2325,7 +1935,6 @@ local function buildMinimap()
     aspect.AspectRatio = 1
     aspect.Parent = MinimapRoot
 
-    -- Clip frame (circular-ish via UICorner, hides everything outside)
     MinimapClip = Instance.new("Frame")
     MinimapClip.Name = "Clip"
     MinimapClip.Size = UDim2.fromScale(1, 1)
@@ -2336,9 +1945,6 @@ local function buildMinimap()
     clipCorner.CornerRadius = UDim.new(0, 3)
     clipCorner.Parent = MinimapClip
 
-    -- Rotate frame: sits at clip center (0.5, 0.5), has AnchorPoint 0.5, 0.5
-    -- so its rotation pivot is the clip center (= where player appears)
-    -- We rotate this frame, and inside it the image is positioned with offset.
     MinimapRotateFrame = Instance.new("Frame")
     MinimapRotateFrame.Name = "Rotate"
     MinimapRotateFrame.AnchorPoint = Vector2.new(0.5, 0.5)
@@ -2347,8 +1953,6 @@ local function buildMinimap()
     MinimapRotateFrame.BackgroundTransparency = 1
     MinimapRotateFrame.Parent = MinimapClip
 
-    -- Map image inside the rotate frame. AnchorPoint at center; we move it
-    -- via Position to center the player on the clip.
     MinimapImage = Instance.new("ImageLabel")
     MinimapImage.Name = "MapImage"
     MinimapImage.BackgroundTransparency = 1
@@ -2359,7 +1963,6 @@ local function buildMinimap()
     MinimapImage.ZIndex = 1
     MinimapImage.Parent = MinimapRotateFrame
 
-    -- Player "you" arrow (always at clip center, on top of rotate frame)
     MinimapPlayerDot = Instance.new("TextLabel")
     MinimapPlayerDot.Name = "You"
     MinimapPlayerDot.AnchorPoint = Vector2.new(0.5, 0.5)
@@ -2379,14 +1982,11 @@ local function buildMinimap()
     youStroke.Transparency = 0.1
     youStroke.Parent = MinimapPlayerDot
 
-    -- Allow dragging the minimap
     local dragging_mini = false
     local miniStart, miniStartPos
     MinimapRoot.InputBegan:Connect(function(input)
         if (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) and guiVisible then
-            dragging_mini = true
-            miniStart = input.Position
-            miniStartPos = MinimapRoot.Position
+            dragging_mini = true miniStart = input.Position miniStartPos = MinimapRoot.Position
         end
     end)
     MinimapRoot.InputEnded:Connect(function(input)
@@ -2394,7 +1994,8 @@ local function buildMinimap()
             dragging_mini = false
         end
     end)
-    UserInputService.InputChanged:Connect(function(input)
+    trackConnection(UserInputService.InputChanged:Connect(function(input)
+        if not CleanupRegistry.loaded then return end
         if dragging_mini and guiVisible and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
             local delta = input.Position - miniStart
             MinimapRoot.Position = UDim2.new(
@@ -2402,18 +2003,13 @@ local function buildMinimap()
                 miniStartPos.Y.Scale, miniStartPos.Y.Offset + delta.Y
             )
         end
-    end)
+    end))
 end
 
 local function destroyMinimap()
     if MinimapGui then
         MinimapGui:Destroy()
-        MinimapGui = nil
-        MinimapRoot = nil
-        MinimapClip = nil
-        MinimapRotateFrame = nil
-        MinimapImage = nil
-        MinimapPlayerDot = nil
+        MinimapGui, MinimapRoot, MinimapClip, MinimapRotateFrame, MinimapImage, MinimapPlayerDot = nil, nil, nil, nil, nil, nil
     end
     MinimapDots = {}
 end
@@ -2422,11 +2018,9 @@ local function getOrCreateMiniDot(name)
     local entry = MinimapDots[name]
     if entry and (not entry.Dot or not entry.Dot.Parent) then
         if entry.Dot and entry.Dot.Parent then entry.Dot:Destroy() end
-        entry = nil
-        MinimapDots[name] = nil
+        entry = nil MinimapDots[name] = nil
     end
     if not entry then
-        -- Player dots live INSIDE the rotate frame so they rotate with the map
         local dot = Instance.new("Frame")
         dot.Name = "MD_" .. name
         dot.AnchorPoint = Vector2.new(0.5, 0.5)
@@ -2434,14 +2028,8 @@ local function getOrCreateMiniDot(name)
         dot.BackgroundColor3 = Color3.fromRGB(255, 80, 80)
         dot.BorderSizePixel = 0
         dot.ZIndex = 3
-        local c = Instance.new("UICorner")
-        c.CornerRadius = UDim.new(1, 0)
-        c.Parent = dot
-        local s = Instance.new("UIStroke")
-        s.Color = Color3.fromRGB(0, 0, 0)
-        s.Thickness = 1
-        s.Transparency = 0.1
-        s.Parent = dot
+        local c = Instance.new("UICorner") c.CornerRadius = UDim.new(1, 0) c.Parent = dot
+        local s = Instance.new("UIStroke") s.Color = Color3.fromRGB(0, 0, 0) s.Thickness = 1 s.Transparency = 0.1 s.Parent = dot
         dot.Parent = MinimapRotateFrame
         entry = {Dot = dot}
         MinimapDots[name] = entry
@@ -2459,94 +2047,51 @@ end
 local function updateMinimap()
     if not Config.Misc.Minimap then return end
     if not mapConfig then return end
-    -- Don't show minimap when the full map is open
     local fullMap = findMapFrame()
-    if fullMap and fullMap.Visible then
-        MinimapRoot.Visible = false
-        return
-    end
+    if fullMap and fullMap.Visible then MinimapRoot.Visible = false return end
     MinimapRoot.Visible = true
-
-    -- Apply size and opacity from config.
-    -- Opacity controls the GUI itself (root + image), not just the image.
     MinimapRoot.Size = UDim2.fromOffset(Config.Misc.MinimapSize, Config.Misc.MinimapSize)
     MinimapRoot.BackgroundTransparency = 1 - Config.Misc.MinimapOpacity
     MinimapImage.Image = mapConfig.image
-    MinimapImage.ImageTransparency = 0  -- image stays opaque; root controls opacity
+    MinimapImage.ImageTransparency = 0
     MinimapPlayerDot.TextTransparency = 1 - Config.Misc.MinimapOpacity
-    -- Stroke opacity too
     for _, child in ipairs(MinimapRoot:GetChildren()) do
-        if child:IsA("UIStroke") then
-            child.Transparency = 1 - (Config.Misc.MinimapOpacity * 0.6)
-        end
+        if child:IsA("UIStroke") then child.Transparency = 1 - (Config.Misc.MinimapOpacity * 0.6) end
     end
-
-    -- Get local player position & rotation
     local char = LocalPlayer.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
-    if not hrp or not hrp:IsA("BasePart") then
-        MinimapRoot.Visible = false
-        return
-    end
-
+    if not hrp or not hrp:IsA("BasePart") then MinimapRoot.Visible = false return end
     local bounds = mapConfig.bounds
     if not bounds then return end
-
-    -- Player's normalized map position (0..1)
     local px = (hrp.Position.X - bounds.minX) / bounds.spanX
     local py = (hrp.Position.Z - bounds.minZ) / bounds.spanZ
-
-    -- Zoom factor: higher zoom = map image appears bigger = less area visible.
-    -- In follow mode, we need extra coverage so the rotated image never shows
-    -- black edges. sqrt(2) ~ 1.414 guarantees full coverage at any rotation.
-    -- Enforce minimum zoom so image always covers the clip (no black edges).
     local userZoom = Config.Misc.MinimapZoom
     local minZoom = Config.Misc.MinimapFollow and 0.4 or 0.5
     local zoom = math.max(userZoom, minZoom)
-    local imgScale
-    if Config.Misc.MinimapFollow then
-        imgScale = 2 * zoom * 1.414  -- extra coverage for rotation
-    else
-        imgScale = 2 * zoom
-    end
+    local imgScale = Config.Misc.MinimapFollow and (2 * zoom * 1.414) or (2 * zoom)
     local imgHalf = imgScale / 2
-
-    -- IDEAL image position (player would be at clip center 0.5, 0.5)
     local imgIdealX = 0.5 - (px - 0.5) * imgScale
     local imgIdealY = 0.5 - (py - 0.5) * imgScale
-
-    -- EDGE LOCK: clamp image position so it never exposes black edges.
-    -- When the player approaches a map edge, the image stops moving in that
-    -- direction and the player dot moves off-center instead (like PUBG/COD minimap).
-    -- Each axis is clamped independently - if the player is at the right edge but
-    -- not top/bottom, the image locks horizontally but keeps following vertically.
     local imgMin = 1 - imgHalf
     local imgMax = imgHalf
-    if imgMin > imgMax then imgMin = 0.5; imgMax = 0.5 end
+    if imgMin > imgMax then imgMin = 0.5 imgMax = 0.5 end
     local imgClampedX = math.clamp(imgIdealX, imgMin, imgMax)
     local imgClampedY = math.clamp(imgIdealY, imgMin, imgMax)
-
     MinimapImage.Size = UDim2.fromScale(imgScale, imgScale)
     MinimapImage.Position = UDim2.fromScale(imgClampedX, imgClampedY)
-
-    -- Rotate the rotate frame (not the image) so the pivot is at clip center
     local lookVector = hrp.CFrame.LookVector
     local playerYaw = math.atan2(lookVector.X, -lookVector.Z)
     local rotDeg
     if Config.Misc.MinimapFollow then
         rotDeg = -math.deg(playerYaw)
-        MinimapPlayerDot.Rotation = 0  -- arrow stays up; world rotates around it
+        MinimapPlayerDot.Rotation = 0
     else
         rotDeg = 0
-        MinimapPlayerDot.Rotation = math.deg(playerYaw)  -- arrow shows facing direction
+        MinimapPlayerDot.Rotation = math.deg(playerYaw)
     end
     MinimapRotateFrame.Rotation = rotDeg
-
-    -- Compute player's actual screen position in clip coords (0..1).
-    -- Player's position in rotate frame local coords:
     local playerLocalX = imgClampedX + (px - 0.5) * imgScale
     local playerLocalY = imgClampedY + (py - 0.5) * imgScale
-    -- If rotate frame is rotated, transform to clip coords by rotating around (0.5, 0.5)
     local playerClipX, playerClipY
     if Config.Misc.MinimapFollow and rotDeg ~= 0 then
         local theta = math.rad(rotDeg)
@@ -2559,8 +2104,6 @@ local function updateMinimap()
         playerClipY = playerLocalY
     end
     MinimapPlayerDot.Position = UDim2.fromScale(playerClipX, playerClipY)
-
-    -- Overlay player dots (only when radar ESP is enabled)
     if Config.Misc.Radar then
         local playersFolder = workspace:FindFirstChild("Players")
         if playersFolder then
@@ -2571,13 +2114,10 @@ local function updateMinimap()
                     local mhum = m:FindFirstChildOfClass("Humanoid")
                     if mhrp and mhrp:IsA("BasePart") and (not mhum or mhum.Health > 0) then
                         local entry = getOrCreateMiniDot(m.Name)
-                        -- Dot position in rotate frame local coords (same formula as player dot,
-                        -- but using the other player's map position)
                         local otherPx = (mhrp.Position.X - bounds.minX) / bounds.spanX
                         local otherPy = (mhrp.Position.Z - bounds.minZ) / bounds.spanZ
                         local dotLocalX = imgClampedX + (otherPx - 0.5) * imgScale
                         local dotLocalY = imgClampedY + (otherPy - 0.5) * imgScale
-                        -- Hide dots that fall outside the rotate frame (and thus outside the clip)
                         if dotLocalX < 0 or dotLocalX > 1 or dotLocalY < 0 or dotLocalY > 1 then
                             entry.Dot.Visible = false
                         else
@@ -2594,11 +2134,8 @@ local function updateMinimap()
                     end
                 end
             end
-            -- Hide dots no longer present
             for k, v in pairs(MinimapDots) do
-                if not seen[k] and v.Dot and v.Dot.Parent then
-                    v.Dot.Visible = false
-                end
+                if not seen[k] and v.Dot and v.Dot.Parent then v.Dot.Visible = false end
             end
         end
     else
@@ -2610,221 +2147,106 @@ local function setMinimap(enabled)
     if enabled then
         buildMinimap()
         if not MinimapConn then
-            MinimapConn = RunService.RenderStepped:Connect(function()
-                pcall(updateMinimap)
-            end)
+            MinimapConn = RunService.RenderStepped:Connect(function() pcall(updateMinimap) end)
         end
     else
-        if MinimapConn then
-            MinimapConn:Disconnect()
-            MinimapConn = nil
-        end
+        if MinimapConn then MinimapConn:Disconnect() MinimapConn = nil end
         destroyMinimap()
     end
 end
 
--- Minimap section in UI
-addSection(MiscScroll, "MINIMAP", THEME.palette.primaryGreen)
-makeToggle(MiscScroll, "Minimap", Config.Misc.Minimap, function(v)
-    Config.Misc.Minimap = v
-    setMinimap(v)
-end)
-makeSubToggle(MiscScroll, "Follow rotation", Config.Misc.MinimapFollow, function(v)
-    Config.Misc.MinimapFollow = v
-end)
-makeSlider(MiscScroll, "Size", 100, 400, Config.Misc.MinimapSize, function(v)
-    Config.Misc.MinimapSize = math.floor(v)
-end)
-makeSlider(MiscScroll, "Zoom", 0.4, 2, Config.Misc.MinimapZoom, function(v)
-    Config.Misc.MinimapZoom = v
-end, true)
-makeSlider(MiscScroll, "Opacity", 0, 1, Config.Misc.MinimapOpacity, function(v)
-    Config.Misc.MinimapOpacity = v
-end, true)
+addSection(MiscScroll, "MINIMAPA", THEME.palette.primaryGreen)
+makeToggle(MiscScroll, "Minimapa", Config.Misc.Minimap, function(v) Config.Misc.Minimap = v setMinimap(v) end)
+makeSubToggle(MiscScroll, "Seguir rotacao", Config.Misc.MinimapFollow, function(v) Config.Misc.MinimapFollow = v end)
+makeSlider(MiscScroll, "Tamanho", 100, 400, Config.Misc.MinimapSize, function(v) Config.Misc.MinimapSize = math.floor(v) end)
+makeSlider(MiscScroll, "Zoom", 0.4, 2, Config.Misc.MinimapZoom, function(v) Config.Misc.MinimapZoom = v end, true)
+makeSlider(MiscScroll, "Opacidade", 0, 1, Config.Misc.MinimapOpacity, function(v) Config.Misc.MinimapOpacity = v end, true)
 
---======================================================
--- Config column (save/load/delete/overwrite/autoexecute)
--- All configs are stored in workspace folder "bagabo/"
---======================================================
+-- Config column
+local function fileExists(path) local ok, result = pcall(function() return isfile and isfile(path) end) return ok and result == true end
+local function folderExists(path) local ok, result = pcall(function() return isfolder and isfolder(path) end) return ok and result == true end
+local function makeFolder(path) pcall(function() if makefolder then makefolder(path) end end) end
+local function writeFile(path, content) pcall(function() if writefile then writefile(path, content) end end) end
+local function readFile(path) local ok, result = pcall(function() return readfile and readfile(path) end) if ok and type(result) == "string" then return result end return nil end
+local function deleteFile(path) pcall(function() if delfile then delfile(path) end end) end
+local function listFiles(path) local ok, result = pcall(function() return listfiles and listfiles(path) end) if ok and type(result) == "table" then return result end return {} end
 
--- File I/O functions (executor-only). Wrapped in pcall in case they don't exist.
-local function fileExists(path)
-    local ok, result = pcall(function() return isfile and isfile(path) end)
-    return ok and result == true
-end
-
-local function folderExists(path)
-    local ok, result = pcall(function() return isfolder and isfolder(path) end)
-    return ok and result == true
-end
-
-local function makeFolder(path)
-    pcall(function() if makefolder then makefolder(path) end end)
-end
-
-local function writeFile(path, content)
-    pcall(function() if writefile then writefile(path, content) end end)
-end
-
-local function readFile(path)
-    local ok, result = pcall(function() return readfile and readfile(path) end)
-    if ok and type(result) == "string" then return result end
-    return nil
-end
-
-local function deleteFile(path)
-    pcall(function() if delfile then delfile(path) end end)
-end
-
-local function listFiles(path)
-    local ok, result = pcall(function() return listfiles and listfiles(path) end)
-    if ok and type(result) == "table" then return result end
-    return {}
-end
-
--- Config folder in workspace
 local CONFIG_FOLDER = "bagabo"
 makeFolder(CONFIG_FOLDER)
-
--- Make sure folder exists (might already exist)
-local function ensureConfigFolder()
-    if not folderExists(CONFIG_FOLDER) then
-        makeFolder(CONFIG_FOLDER)
-    end
-end
+local function ensureConfigFolder() if not folderExists(CONFIG_FOLDER) then makeFolder(CONFIG_FOLDER) end end
 ensureConfigFolder()
 
--- Capture full current config as a serializable table
 local function captureConfig()
     local snap = {}
-    -- ESP categories
-    for _, key in ipairs({"Players", "Corpses", "Vehicles", "LootVeh", "Items"}) do
+    for _, key in ipairs({"Players", "Corpses", "Vehicles", "Items"}) do
         snap[key] = {
-            Enabled = Config[key].Enabled,
-            Name = Config[key].Name,
-            Distance = Config[key].Distance,
-            Box = Config[key].Box,
-            Tracer = Config[key].Tracer,
-            Health = Config[key].Health,
-            Skeleton = Config[key].Skeleton,
-            MaxDistance = Config[key].MaxDistance,
+            Enabled = Config[key].Enabled, Name = Config[key].Name, Distance = Config[key].Distance,
+            Box = Config[key].Box, Tracer = Config[key].Tracer, Health = Config[key].Health,
+            Skeleton = Config[key].Skeleton, MaxDistance = Config[key].MaxDistance,
         }
     end
-    -- Aimbot
     snap.Aimbot = {
-        Enabled = Config.Aimbot.Enabled,
-        WallCheck = Config.Aimbot.WallCheck,
-        SquadCheck = Config.Aimbot.SquadCheck,
-        TargetPart = Config.Aimbot.TargetPart,
-        AimKey = tostring(Config.Aimbot.AimKey.Name),
-        UseMouseInput = Config.Aimbot.UseMouseInput,
-        MouseButton = tostring(Config.Aimbot.MouseButton.Name),
-        FOV = Config.Aimbot.FOV,
-        Smoothness = Config.Aimbot.Smoothness,
-        MaxDistance = Config.Aimbot.MaxDistance,
+        Enabled = Config.Aimbot.Enabled, WallCheck = Config.Aimbot.WallCheck, SquadCheck = Config.Aimbot.SquadCheck,
+        TargetPart = Config.Aimbot.TargetPart, AimKey = tostring(Config.Aimbot.AimKey.Name),
+        UseMouseInput = Config.Aimbot.UseMouseInput, MouseButton = tostring(Config.Aimbot.MouseButton.Name),
+        FOV = Config.Aimbot.FOV, Smoothness = Config.Aimbot.Smoothness, MaxDistance = Config.Aimbot.MaxDistance,
         ShowFOV = Config.Aimbot.ShowFOV,
     }
-    -- Misc
     snap.Misc = {
-        Fullbright = Config.Misc.Fullbright,
-        FullbrightStrength = Config.Misc.FullbrightStrength,
-        NoFog = Config.Misc.NoFog,
-        NoRain = Config.Misc.NoRain,
-        Radar = Config.Misc.Radar,
-        Minimap = Config.Misc.Minimap,
-        MinimapSize = Config.Misc.MinimapSize,
-        MinimapZoom = Config.Misc.MinimapZoom,
-        MinimapOpacity = Config.Misc.MinimapOpacity,
-        MinimapFollow = Config.Misc.MinimapFollow,
+        Fullbright = Config.Misc.Fullbright, FullbrightStrength = Config.Misc.FullbrightStrength,
+        NoFog = Config.Misc.NoFog, NoRain = Config.Misc.NoRain, Radar = Config.Misc.Radar,
+        Minimap = Config.Misc.Minimap, MinimapSize = Config.Misc.MinimapSize, MinimapZoom = Config.Misc.MinimapZoom,
+        MinimapOpacity = Config.Misc.MinimapOpacity, MinimapFollow = Config.Misc.MinimapFollow,
     }
     return snap
 end
 
--- Apply a loaded config table back into Config + UI state
--- (Note: most UI toggles won't auto-update visually since they hold their own
--- state. This applies the values to Config which is what the runtime reads.)
 local function applyConfig(snap)
     if type(snap) ~= "table" then return end
-    -- ESP
-    for _, key in ipairs({"Players", "Corpses", "Vehicles", "LootVeh", "Items"}) do
+    for _, key in ipairs({"Players", "Corpses", "Vehicles", "Items"}) do
         if snap[key] then
             for k, v in pairs(snap[key]) do
-                if Config[key][k] ~= nil then
-                    Config[key][k] = v
-                end
+                if Config[key][k] ~= nil then Config[key][k] = v end
             end
         end
     end
-    -- Aimbot
     if snap.Aimbot then
         for k, v in pairs(snap.Aimbot) do
-            if k == "AimKey" then
-                pcall(function() Config.Aimbot.AimKey = Enum.KeyCode[v] end)
-            elseif k == "MouseButton" then
-                pcall(function() Config.Aimbot.MouseButton = Enum.UserInputType[v] end)
-            elseif Config.Aimbot[k] ~= nil then
-                Config.Aimbot[k] = v
-            end
+            if k == "AimKey" then pcall(function() Config.Aimbot.AimKey = Enum.KeyCode[v] end)
+            elseif k == "MouseButton" then pcall(function() Config.Aimbot.MouseButton = Enum.UserInputType[v] end)
+            elseif Config.Aimbot[k] ~= nil then Config.Aimbot[k] = v end
         end
     end
-    -- Misc
     if snap.Misc then
         for k, v in pairs(snap.Misc) do
-            if Config.Misc[k] ~= nil then
-                Config.Misc[k] = v
-            end
+            if Config.Misc[k] ~= nil then Config.Misc[k] = v end
         end
-        -- Re-apply effects that need side-effects (lighting, fog, rain, radar, minimap)
         pcall(function() setFullbright(Config.Misc.Fullbright) end)
         pcall(function() setNoFog(Config.Misc.NoFog) end)
         pcall(function() setNoRain(Config.Misc.NoRain) end)
-        pcall(function() if not Config.Misc.NoRain and norainConnection then
-            norainConnection:Disconnect() norainConnection = nil
-        end end)
+        pcall(function() if not Config.Misc.NoRain and norainConnection then norainConnection:Disconnect() norainConnection = nil end end)
         pcall(function() setRadar(Config.Misc.Radar) end)
         pcall(function() setMinimap(Config.Misc.Minimap) end)
     end
-
-    -- Now sync the UI elements visually using the registry.
-    -- We build an ordered list of expected values matching the order in which
-    -- UI elements were created (buildESPSection for each category, then Aimbot,
-    -- then Misc). This way each toggle/slider is updated to reflect the new value.
-
-    -- Expected order (must match the creation order):
-    -- ESP: for each of [Players, Corpses, Vehicles, LootVeh, Items]:
-    --   Enabled (toggle), Name (sub), Distance (sub), Box (sub), Tracer (sub),
-    --   [Health if exists] (sub), [Skeleton if exists] (sub), Range (slider)
-    -- Aimbot: Enabled, Wall Check, Squad Check, Show FOV Circle, Use Mouse Input,
-    --   FOV, Distance, Smoothness
-    -- Misc: Fullbright, FB Strength (slider), No Fog, No Rain, Radar,
-    --   Minimap, Follow rotation, Size (slider), Zoom (slider), Opacity (slider)
-
     local expected = {}
-    for _, key in ipairs({"Players", "Corpses", "Vehicles", "LootVeh", "Items"}) do
+    for _, key in ipairs({"Players", "Corpses", "Vehicles", "Items"}) do
         table.insert(expected, {type="bool", val=Config[key].Enabled})
         table.insert(expected, {type="bool", val=Config[key].Name})
         table.insert(expected, {type="bool", val=Config[key].Distance})
         table.insert(expected, {type="bool", val=Config[key].Box})
         table.insert(expected, {type="bool", val=Config[key].Tracer})
-        if Config[key].Health ~= nil then
-            table.insert(expected, {type="bool", val=Config[key].Health})
-        end
-        if Config[key].Skeleton ~= nil then
-            table.insert(expected, {type="bool", val=Config[key].Skeleton})
-        end
+        if Config[key].Health ~= nil then table.insert(expected, {type="bool", val=Config[key].Health}) end
+        if Config[key].Skeleton ~= nil then table.insert(expected, {type="bool", val=Config[key].Skeleton}) end
         table.insert(expected, {type="num", val=Config[key].MaxDistance})
     end
-    -- Aimbot
     table.insert(expected, {type="bool", val=Config.Aimbot.Enabled})
     table.insert(expected, {type="bool", val=Config.Aimbot.WallCheck})
     table.insert(expected, {type="bool", val=Config.Aimbot.SquadCheck})
     table.insert(expected, {type="bool", val=Config.Aimbot.ShowFOV})
     table.insert(expected, {type="bool", val=Config.Aimbot.UseMouseInput})
-    -- (keybind and button groups skipped — not in registry)
     table.insert(expected, {type="num", val=Config.Aimbot.FOV})
     table.insert(expected, {type="num", val=Config.Aimbot.MaxDistance})
     table.insert(expected, {type="num", val=Config.Aimbot.Smoothness})
-    -- Misc
     table.insert(expected, {type="bool", val=Config.Misc.Fullbright})
     table.insert(expected, {type="num", val=Config.Misc.FullbrightStrength})
     table.insert(expected, {type="bool", val=Config.Misc.NoFog})
@@ -2835,74 +2257,54 @@ local function applyConfig(snap)
     table.insert(expected, {type="num", val=Config.Misc.MinimapSize})
     table.insert(expected, {type="num", val=Config.Misc.MinimapZoom})
     table.insert(expected, {type="num", val=Config.Misc.MinimapOpacity})
-
-    -- Apply each expected value to the corresponding registry entry
     for i, exp in ipairs(expected) do
         local reg = UIRegistry[i]
-        if reg and reg.setter then
-            pcall(function() reg.setter(exp.val) end)
-        end
+        if reg and reg.setter then pcall(function() reg.setter(exp.val) end) end
+    end
+    if NamedRegistry.AimKey and snap.Aimbot and snap.Aimbot.AimKey then
+        pcall(function() local keyEnum = Enum.KeyCode[snap.Aimbot.AimKey] if keyEnum then NamedRegistry.AimKey.setter(keyEnum) end end)
+    end
+    if NamedRegistry.MouseButton and snap.Aimbot and snap.Aimbot.MouseButton then
+        pcall(function() local mbEnum = Enum.UserInputType[snap.Aimbot.MouseButton] if mbEnum then NamedRegistry.MouseButton.setter(mbEnum) end end)
+    end
+    if NamedRegistry.TargetPart and snap.Aimbot and snap.Aimbot.TargetPart then
+        pcall(function() NamedRegistry.TargetPart.setter(snap.Aimbot.TargetPart) end)
     end
 end
 
-local function serializeConfig(snap)
-    local ok, json = pcall(function() return HttpService:JSONEncode(snap) end)
-    return ok and json or "{}"
-end
+local function serializeConfig(snap) local ok, json = pcall(function() return HttpService:JSONEncode(snap) end) return ok and json or "{}" end
+local function deserializeConfig(json) local ok, snap = pcall(function() return HttpService:JSONDecode(json) end) return ok and snap or nil end
 
-local function deserializeConfig(json)
-    local ok, snap = pcall(function() return HttpService:JSONDecode(json) end)
-    return ok and snap or nil
-end
-
--- List of saved config names (without extension)
 local function listConfigs()
     ensureConfigFolder()
     local files = listFiles(CONFIG_FOLDER)
     local names = {}
     for _, f in ipairs(files) do
-        -- f is a full path; strip folder and extension
-        local name = f
-        -- Replace backslashes too
-        name = name:gsub("\\", "/")
-        name = name:match("([^/]+)$") or name
+        local name = f:gsub("\\", "/"):match("([^/]+)$") or f
         if name:match("%.json$") then
-            name = name:gsub("%.json$", "")
-            table.insert(names, name)
+            local cleanName = name:gsub("%.json$", "")
+            table.insert(names, cleanName)
         end
     end
     table.sort(names)
     return names
 end
 
--- State for the config list UI
 local selectedConfigName = nil
 local ConfigListScroll = nil
-local ConfigListLayout = nil
-local ConfigListItems = {}  -- name -> button
+local ConfigListItems = {}
 
--- Refresh the visual list
 local function refreshConfigList()
     if not ConfigListScroll then return end
-    -- Update count badge if it exists
-    pcall(function()
-        if drawerCount then
-            local names = listConfigs()
-            drawerCount.Text = tostring(#names)
-        end
-    end)
-    -- Clear existing buttons
-    for _, item in pairs(ConfigListItems) do
-        if item and item.Parent then item:Destroy() end
-    end
+    pcall(function() if drawerCount then drawerCount.Text = tostring(#listConfigs()) end end)
+    for _, item in pairs(ConfigListItems) do if item and item.Parent then item:Destroy() end end
     ConfigListItems = {}
-
     local names = listConfigs()
     if #names == 0 then
         local empty = Instance.new("TextLabel")
         empty.Size = UDim2.new(1, 0, 0, 24)
         empty.BackgroundTransparency = 1
-        empty.Text = "(no configs saved)"
+        empty.Text = "(nenhuma config salva)"
         empty.TextColor3 = THEME.palette.muted
         empty.FontFace = THEME.font.regular
         empty.TextSize = 12
@@ -2911,7 +2313,6 @@ local function refreshConfigList()
         ConfigListItems["_empty"] = empty
         return
     end
-
     for _, name in ipairs(names) do
         local btn = Instance.new("TextButton")
         btn.Size = UDim2.new(1, 0, 0, 32)
@@ -2924,29 +2325,17 @@ local function refreshConfigList()
         btn.TextSize = 13
         btn.TextColor3 = (name == selectedConfigName) and THEME.palette.backgroundGray or THEME.palette.primaryGray
         btn.TextXAlignment = Enum.TextXAlignment.Left
-        local btnPad = Instance.new("UIPadding")
-        btnPad.PaddingLeft = UDim.new(0, 10)
-        btnPad.Parent = btn
-        local btnCorner = Instance.new("UICorner")
-        btnCorner.CornerRadius = UDim.new(0, 1)
-        btnCorner.Parent = btn
-        -- Mark autoload configs with a star
-        if fileExists(CONFIG_FOLDER .. "/" .. name .. ".autoload") then
-            btn.Text = "* " .. name
-        end
+        local btnPad = Instance.new("UIPadding") btnPad.PaddingLeft = UDim.new(0, 10) btnPad.Parent = btn
+        local btnCorner = Instance.new("UICorner") btnCorner.CornerRadius = UDim.new(0, 1) btnCorner.Parent = btn
+        if fileExists(CONFIG_FOLDER .. "/" .. name .. ".autoload") then btn.Text = "* " .. name end
         btn.Parent = ConfigListScroll
-        btn.MouseButton1Click:Connect(function()
-            selectedConfigName = name
-            refreshConfigList()
-        end)
+        btn.MouseButton1Click:Connect(function() selectedConfigName = name refreshConfigList() end)
         ConfigListItems[name] = btn
     end
 end
 
--- Build the Config column UI
-addSection(ConfigScroll, "SAVED CONFIGS", THEME.palette.primaryGreen)
+addSection(ConfigScroll, "CONFIGS SALVAS", THEME.palette.primaryGreen)
 
--- Drawer header (clickable to expand/collapse the list) - organized with icon + text + count
 local drawerHeader = Instance.new("TextButton")
 drawerHeader.Size = UDim2.new(1, 0, 0, 36)
 drawerHeader.BackgroundColor3 = THEME.palette.backgroundGray
@@ -2956,18 +2345,10 @@ drawerHeader.AutoButtonColor = false
 drawerHeader.Text = ""
 drawerHeader.LayoutOrder = nextOrder()
 drawerHeader.Parent = ConfigScroll
-local dhCorner = Instance.new("UICorner")
-dhCorner.CornerRadius = UDim.new(0, 1)
-dhCorner.Parent = drawerHeader
-local dhStroke = Instance.new("UIStroke")
-dhStroke.Color = THEME.palette.primaryGray
-dhStroke.Thickness = 1
-dhStroke.Transparency = 0.72
-dhStroke.Parent = drawerHeader
+local dhCorner = Instance.new("UICorner") dhCorner.CornerRadius = UDim.new(0, 1) dhCorner.Parent = drawerHeader
+local dhStroke = Instance.new("UIStroke") dhStroke.Color = THEME.palette.primaryGray dhStroke.Thickness = 1 dhStroke.Transparency = 0.72 dhStroke.Parent = drawerHeader
 
--- Arrow icon on the left
 local drawerArrow = Instance.new("TextLabel")
-drawerArrow.Name = "Arrow"
 drawerArrow.Size = UDim2.new(0, 24, 1, 0)
 drawerArrow.Position = UDim2.new(0, 8, 0, 0)
 drawerArrow.BackgroundTransparency = 1
@@ -2978,9 +2359,7 @@ drawerArrow.TextColor3 = THEME.palette.primaryGreen
 drawerArrow.TextXAlignment = Enum.TextXAlignment.Center
 drawerArrow.Parent = drawerHeader
 
--- Label text
 local drawerLabel = Instance.new("TextLabel")
-drawerLabel.Name = "Label"
 drawerLabel.Size = UDim2.new(1, -80, 1, 0)
 drawerLabel.Position = UDim2.new(0, 32, 0, 0)
 drawerLabel.BackgroundTransparency = 1
@@ -2991,9 +2370,7 @@ drawerLabel.TextColor3 = THEME.palette.primaryGray
 drawerLabel.TextXAlignment = Enum.TextXAlignment.Left
 drawerLabel.Parent = drawerHeader
 
--- Count badge on the right
 local drawerCount = Instance.new("TextLabel")
-drawerCount.Name = "Count"
 drawerCount.Size = UDim2.new(0, 36, 0, 20)
 drawerCount.Position = UDim2.new(1, -44, 0.5, -10)
 drawerCount.BackgroundColor3 = THEME.palette.tabInactive
@@ -3004,24 +2381,15 @@ drawerCount.FontFace = THEME.font.bold
 drawerCount.TextSize = 11
 drawerCount.TextColor3 = THEME.palette.muted
 drawerCount.Parent = drawerHeader
-local dcCorner = Instance.new("UICorner")
-dcCorner.CornerRadius = UDim.new(1, 0)
-dcCorner.Parent = drawerCount
+local dcCorner = Instance.new("UICorner") dcCorner.CornerRadius = UDim.new(1, 0) dcCorner.Parent = drawerCount
 
--- Hover effect
 drawerHeader.MouseEnter:Connect(function() dhStroke.Transparency = 0.4 end)
 drawerHeader.MouseLeave:Connect(function() dhStroke.Transparency = 0.72 end)
 
 local drawerOpen = false
-
--- Function to update the count badge
-local function updateDrawerCount()
-    local names = listConfigs()
-    drawerCount.Text = tostring(#names)
-end
+local function updateDrawerCount() drawerCount.Text = tostring(#listConfigs()) end
 updateDrawerCount()
 
--- Config list (drawer) - scrolling frame with selectable items, hidden by default
 ConfigListScroll = Instance.new("ScrollingFrame")
 ConfigListScroll.Size = UDim2.new(1, 0, 0, 140)
 ConfigListScroll.BackgroundColor3 = THEME.palette.tabInactive
@@ -3032,77 +2400,48 @@ ConfigListScroll.ScrollBarImageColor3 = THEME.palette.primaryGray
 ConfigListScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
 ConfigListScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
 ConfigListScroll.LayoutOrder = nextOrder()
-ConfigListScroll.Visible = false  -- hidden by default
+ConfigListScroll.Visible = false
 ConfigListScroll.Parent = ConfigScroll
-
-local clsCorner = Instance.new("UICorner")
-clsCorner.CornerRadius = UDim.new(0, 1)
-clsCorner.Parent = ConfigListScroll
-
-local clsPadding = Instance.new("UIPadding")
-clsPadding.PaddingTop = UDim.new(0, 6)
-clsPadding.PaddingBottom = UDim.new(0, 6)
-clsPadding.PaddingLeft = UDim.new(0, 6)
-clsPadding.PaddingRight = UDim.new(0, 6)
-clsPadding.Parent = ConfigListScroll
-
-ConfigListLayout = Instance.new("UIListLayout")
-ConfigListLayout.Padding = UDim.new(0, 4)
-ConfigListLayout.SortOrder = Enum.SortOrder.LayoutOrder
-ConfigListLayout.Parent = ConfigListScroll
+local clsCorner = Instance.new("UICorner") clsCorner.CornerRadius = UDim.new(0, 1) clsCorner.Parent = ConfigListScroll
+local clsPadding = Instance.new("UIPadding") clsPadding.PaddingTop = UDim.new(0, 6) clsPadding.PaddingBottom = UDim.new(0, 6) clsPadding.PaddingLeft = UDim.new(0, 6) clsPadding.PaddingRight = UDim.new(0, 6) clsPadding.Parent = ConfigListScroll
+local ConfigListLayout = Instance.new("UIListLayout") ConfigListLayout.Padding = UDim.new(0, 4) ConfigListLayout.SortOrder = Enum.SortOrder.LayoutOrder ConfigListLayout.Parent = ConfigListScroll
 
 drawerHeader.MouseButton1Click:Connect(function()
     drawerOpen = not drawerOpen
     ConfigListScroll.Visible = drawerOpen
-    -- Rotate the arrow icon when open (V shape) vs closed (> shape)
     drawerArrow.Text = drawerOpen and "v" or ">"
-    drawerLabel.Text = drawerOpen and "Hide configs" or "Show configs"
-    if drawerOpen then
-        refreshConfigList()
-    end
+    drawerLabel.Text = drawerOpen and "Esconder configs" or "Mostrar configs"
+    if drawerOpen then refreshConfigList() end
     updateDrawerCount()
 end)
-
 refreshConfigList()
 updateDrawerCount()
 
-addSection(ConfigScroll, "ACTIONS", THEME.palette.primaryGreen)
-
-makeButton(ConfigScroll, "Save (new)", function()
-    showPopup("Save Config", "Enter a name for this config:", function(name)
+addSection(ConfigScroll, "ACOES", THEME.palette.primaryGreen)
+makeButton(ConfigScroll, "Salvar (novo)", function()
+    showPopup("Salvar Config", "Digite um nome para esta config:", function(name)
         name = (name or ""):gsub("[^%w%-_]", "")
         if #name < 1 then return end
         local path = CONFIG_FOLDER .. "/" .. name .. ".json"
-        if fileExists(path) then
-            -- Should not happen with "Save new", but just in case
-            return
-        end
+        if fileExists(path) then return end
         ensureConfigFolder()
         writeFile(path, serializeConfig(captureConfig()))
         selectedConfigName = name
         refreshConfigList()
-    end, { showInput = true, yesText = "Save", noText = "Cancel" })
+    end, { showInput = true, yesText = "Salvar", noText = "Cancelar" })
 end)
-
-makeButton(ConfigScroll, "Overwrite", function()
-    if not selectedConfigName then
-        showPopup("Overwrite", "Select a config first.", nil, { yesText = "OK", noText = "OK" })
-        return
-    end
-    showPopup("Overwrite Config", "Overwrite '" .. selectedConfigName .. "' with current settings?", function()
+makeButton(ConfigScroll, "Sobrescrever", function()
+    if not selectedConfigName then showPopup("Sobrescrever", "Selecione uma config primeiro.", nil, { yesText = "OK", noText = "OK" }) return end
+    showPopup("Sobrescrever Config", "Sobrescrever '" .. selectedConfigName .. "' com as configuracoes atuais?", function()
         local path = CONFIG_FOLDER .. "/" .. selectedConfigName .. ".json"
         ensureConfigFolder()
         writeFile(path, serializeConfig(captureConfig()))
         refreshConfigList()
     end)
 end, true)
-
-makeButton(ConfigScroll, "Load", function()
-    if not selectedConfigName then
-        showPopup("Load", "Select a config first.", nil, { yesText = "OK", noText = "OK" })
-        return
-    end
-    showPopup("Load Config", "Load '" .. selectedConfigName .. "'?\nThis will replace your current settings.", function()
+makeButton(ConfigScroll, "Carregar", function()
+    if not selectedConfigName then showPopup("Carregar", "Selecione uma config primeiro.", nil, { yesText = "OK", noText = "OK" }) return end
+    showPopup("Carregar Config", "Carregar '" .. selectedConfigName .. "'?\nIsso substituira suas configuracoes atuais.", function()
         local path = CONFIG_FOLDER .. "/" .. selectedConfigName .. ".json"
         local json = readFile(path)
         if not json then return end
@@ -3112,64 +2451,42 @@ makeButton(ConfigScroll, "Load", function()
 end)
 
 addSection(ConfigScroll, "AUTOLOAD", THEME.palette.primaryGreen)
-
-makeButton(ConfigScroll, "Set Autoload", function()
-    if not selectedConfigName then
-        showPopup("Autoload", "Select a config first.", nil, { yesText = "OK", noText = "OK" })
-        return
-    end
-    -- Clear any existing autoload markers first
+makeButton(ConfigScroll, "Definir Autoload", function()
+    if not selectedConfigName then showPopup("Autoload", "Selecione uma config primeiro.", nil, { yesText = "OK", noText = "OK" }) return end
     local names = listConfigs()
-    for _, n in ipairs(names) do
-        deleteFile(CONFIG_FOLDER .. "/" .. n .. ".autoload")
-    end
-    local markerPath = CONFIG_FOLDER .. "/" .. selectedConfigName .. ".autoload"
-    writeFile(markerPath, "1")
+    for _, n in ipairs(names) do deleteFile(CONFIG_FOLDER .. "/" .. n .. ".autoload") end
+    writeFile(CONFIG_FOLDER .. "/" .. selectedConfigName .. ".autoload", "1")
     refreshConfigList()
-    showPopup("Autoload Set", "'" .. selectedConfigName .. "' will be auto-loaded whenever this script starts.", nil, { yesText = "OK", noText = "Close" })
+    showPopup("Autoload Definido", "'" .. selectedConfigName .. "' sera carregado automaticamente quando o script iniciar.", nil, { yesText = "OK", noText = "Fechar" })
 end)
-
-makeButton(ConfigScroll, "Reset Autoload", function()
-    -- Check if any autoload marker exists
+makeButton(ConfigScroll, "Resetar Autoload", function()
     local hasAutoload = false
     local names = listConfigs()
     for _, n in ipairs(names) do
-        if fileExists(CONFIG_FOLDER .. "/" .. n .. ".autoload") then
-            hasAutoload = true
-            break
-        end
+        if fileExists(CONFIG_FOLDER .. "/" .. n .. ".autoload") then hasAutoload = true break end
     end
-    if not hasAutoload then
-        showPopup("Reset Autoload", "No autoload config is currently set.", nil, { yesText = "OK", noText = "Close" })
-        return
-    end
-    showPopup("Reset Autoload", "Remove the current autoload config?\nThe script will start with default settings.", function()
+    if not hasAutoload then showPopup("Resetar Autoload", "Nenhuma config de autoload esta definida.", nil, { yesText = "OK", noText = "Fechar" }) return end
+    showPopup("Resetar Autoload", "Remover a config de autoload atual?\nO script iniciara com as configuracoes padrao.", function()
         local names2 = listConfigs()
-        for _, n in ipairs(names2) do
-            deleteFile(CONFIG_FOLDER .. "/" .. n .. ".autoload")
-        end
+        for _, n in ipairs(names2) do deleteFile(CONFIG_FOLDER .. "/" .. n .. ".autoload") end
         refreshConfigList()
-    end, { yesText = "Reset", noText = "Cancel" })
+    end, { yesText = "Resetar", noText = "Cancelar" })
 end, true)
-
-makeButton(ConfigScroll, "Delete", function()
-    if not selectedConfigName then
-        showPopup("Delete", "Select a config first.", nil, { yesText = "OK", noText = "OK" })
-        return
-    end
-    showPopup("Delete Config", "Are you sure you want to delete '" .. selectedConfigName .. "'?\nThis cannot be undone.", function()
+makeButton(ConfigScroll, "Deletar", function()
+    if not selectedConfigName then showPopup("Deletar", "Selecione uma config primeiro.", nil, { yesText = "OK", noText = "OK" }) return end
+    showPopup("Deletar Config", "Tem certeza que deseja deletar '" .. selectedConfigName .. "'?\nIsso nao pode ser desfeito.", function()
         local path = CONFIG_FOLDER .. "/" .. selectedConfigName .. ".json"
         deleteFile(path)
         deleteFile(CONFIG_FOLDER .. "/" .. selectedConfigName .. ".autoload")
         selectedConfigName = nil
         refreshConfigList()
-    end, { yesText = "Delete", noText = "Cancel" })
+    end, { yesText = "Deletar", noText = "Cancelar" })
 end, true)
 
 local configHint = Instance.new("TextLabel")
 configHint.Size = UDim2.new(1, 0, 0, 50)
 configHint.BackgroundTransparency = 1
-configHint.Text = "Configs in: workspace/bagabo/\n(* = autoload)"
+configHint.Text = "Configs em: workspace/bagabo/\n(* = autoload)"
 configHint.TextColor3 = THEME.palette.muted
 configHint.FontFace = THEME.font.regular
 configHint.TextSize = 11
@@ -3177,16 +2494,8 @@ configHint.TextWrapped = true
 configHint.LayoutOrder = nextOrder()
 configHint.Parent = ConfigScroll
 
---======================================================
--- Auto-load on startup (always check for autoload marker)
--- This runs whenever the script starts, regardless of Autoexecute toggle.
--- Autoexecute only controls whether the script itself runs automatically
--- when joining a game (handled by the loader in the executor's AutoExec folder).
---======================================================
 task.spawn(function()
-    -- Wait a moment for the script to fully initialize
     task.wait(1)
-    -- Find the autoload config
     local names = listConfigs()
     for _, n in ipairs(names) do
         if fileExists(CONFIG_FOLDER .. "/" .. n .. ".autoload") then
@@ -3194,22 +2503,14 @@ task.spawn(function()
             local json = readFile(path)
             if json then
                 local snap = deserializeConfig(json)
-                if snap then
-                    applyConfig(snap)
-                end
+                if snap then applyConfig(snap) end
             end
             break
         end
     end
 end)
 
-
---======================================================
 -- Floating buttons (mobile only)
--- ESP button: always visible (toggles menu)
--- AIM button: only visible when aimbot is enabled
--- Both hide when inventory is open
---======================================================
 if not isPC then
     local FloatBtnsGui = Instance.new("ScreenGui")
     FloatBtnsGui.Name = "ESPFloatBtns"
@@ -3224,9 +2525,7 @@ if not isPC then
     local btnFont = 16
     local btnRadius = 8
 
-    -- GUI toggle button (top-right)
     local GuiToggleBtn = Instance.new("TextButton")
-    GuiToggleBtn.Name = "GuiToggle"
     GuiToggleBtn.Size = btnSize
     GuiToggleBtn.Position = UDim2.new(1, -64, 0, 8)
     GuiToggleBtn.BackgroundColor3 = THEME.palette.backgroundGray
@@ -3237,18 +2536,10 @@ if not isPC then
     GuiToggleBtn.TextSize = btnFont
     GuiToggleBtn.TextColor3 = THEME.palette.primaryGray
     GuiToggleBtn.Parent = FloatBtnsGui
-    local gtCorner = Instance.new("UICorner")
-    gtCorner.CornerRadius = UDim.new(0, btnRadius)
-    gtCorner.Parent = GuiToggleBtn
-    local gtStroke = Instance.new("UIStroke")
-    gtStroke.Color = THEME.palette.primaryGray
-    gtStroke.Thickness = 1
-    gtStroke.Transparency = 0.4
-    gtStroke.Parent = GuiToggleBtn
+    local gtCorner = Instance.new("UICorner") gtCorner.CornerRadius = UDim.new(0, btnRadius) gtCorner.Parent = GuiToggleBtn
+    local gtStroke = Instance.new("UIStroke") gtStroke.Color = THEME.palette.primaryGray gtStroke.Thickness = 1 gtStroke.Transparency = 0.4 gtStroke.Parent = GuiToggleBtn
 
-    -- Aimbot toggle button (below GUI toggle) - hidden by default, only shows when aimbot is ON
     local AimToggleBtn = Instance.new("TextButton")
-    AimToggleBtn.Name = "AimToggle"
     AimToggleBtn.Size = btnSize
     AimToggleBtn.Position = UDim2.new(1, -64, 0, 72)
     AimToggleBtn.BackgroundColor3 = THEME.palette.backgroundGray
@@ -3258,21 +2549,13 @@ if not isPC then
     AimToggleBtn.Font = Enum.Font.GothamBold
     AimToggleBtn.TextSize = btnFont
     AimToggleBtn.TextColor3 = THEME.palette.primaryGreen
-    AimToggleBtn.Visible = false  -- hidden by default (only shows when aimbot is enabled)
+    AimToggleBtn.Visible = false
     AimToggleBtn.Parent = FloatBtnsGui
-    local atCorner = Instance.new("UICorner")
-    atCorner.CornerRadius = UDim.new(0, btnRadius)
-    atCorner.Parent = AimToggleBtn
-    local atStroke = Instance.new("UIStroke")
-    atStroke.Color = THEME.palette.primaryGreen
-    atStroke.Thickness = 1
-    atStroke.Transparency = 0
-    atStroke.Parent = AimToggleBtn
+    local atCorner = Instance.new("UICorner") atCorner.CornerRadius = UDim.new(0, btnRadius) atCorner.Parent = AimToggleBtn
+    local atStroke = Instance.new("UIStroke") atStroke.Color = THEME.palette.primaryGreen atStroke.Thickness = 1 atStroke.Transparency = 0 atStroke.Parent = AimToggleBtn
 
     local function updateAimBtn()
-        -- AIM button only visible when aimbot master toggle is ON
         AimToggleBtn.Visible = Config.Aimbot.Enabled
-        -- Button color reflects aiming state (green=aiming, gray=not aiming)
         if aiming then
             AimToggleBtn.TextColor3 = THEME.palette.primaryGreen
             atStroke.Color = THEME.palette.primaryGreen
@@ -3284,8 +2567,6 @@ if not isPC then
         end
     end
 
-    -- Detect inventory open/close by passively reading InventoryUI.Enabled
-    -- (completely indetectable - just reading a property, no hooks)
     local function isInventoryOpen()
         local pg = LocalPlayer:FindFirstChild("PlayerGui")
         if not pg then return false end
@@ -3294,7 +2575,6 @@ if not isPC then
         return inv.Enabled
     end
 
-    -- Loop to hide buttons when inventory is open, and sync AIM button visibility
     RunService.RenderStepped:Connect(function()
         local invOpen = isInventoryOpen()
         if invOpen then
@@ -3302,12 +2582,8 @@ if not isPC then
             AimToggleBtn.Visible = false
         else
             GuiToggleBtn.Visible = true
-            -- AIM button visible only when aimbot master toggle is ON
             local shouldShowAim = Config.Aimbot.Enabled
-            if AimToggleBtn.Visible ~= shouldShowAim then
-                AimToggleBtn.Visible = shouldShowAim
-            end
-            -- Update color based on aiming state
+            if AimToggleBtn.Visible ~= shouldShowAim then AimToggleBtn.Visible = shouldShowAim end
             if shouldShowAim then
                 if aiming then
                     AimToggleBtn.TextColor3 = THEME.palette.primaryGreen
@@ -3328,17 +2604,15 @@ if not isPC then
     end)
 
     AimToggleBtn.MouseButton1Click:Connect(function()
-        aiming = not aiming  -- toggle current aim state (NOT the master toggle)
+        aiming = not aiming
         updateAimBtn()
     end)
 
     updateAimBtn()
 end
 
---======================================================
 -- Mouse / Input
---======================================================
-guiVisible = false  -- assign to forward-declared variable
+guiVisible = false
 local function setMouseFree(state)
     pcall(function()
         if UserInputService.MouseBehavior then
@@ -3356,102 +2630,60 @@ local function toggleGui()
     setMouseFree(guiVisible)
 end
 
--- Force mouse free every frame while menu is open
--- (games often re-lock the mouse each frame)
 trackConnection(RunService.RenderStepped:Connect(function()
+    if not Camera then Camera = workspace.CurrentCamera end
+    if not Camera then return end
     if guiVisible then
         pcall(function()
-            if UserInputService.MouseBehavior then
-                UserInputService.MouseBehavior = Enum.MouseBehavior.Default
-            end
-            if UserInputService.MouseIconEnabled ~= nil then
-                UserInputService.MouseIconEnabled = true
-            end
+            if UserInputService.MouseBehavior then UserInputService.MouseBehavior = Enum.MouseBehavior.Default end
+            if UserInputService.MouseIconEnabled ~= nil then UserInputService.MouseIconEnabled = true end
         end)
     end
 end))
 
-UserInputService.InputBegan:Connect(function(input)
-    if input.KeyCode == Enum.KeyCode.Insert then
-        toggleGui()
-    end
-end)
+trackConnection(UserInputService.InputBegan:Connect(function(input)
+    if not CleanupRegistry.loaded then return end
+    if input.KeyCode == Enum.KeyCode.Insert then toggleGui() end
+end))
 
-Main:GetPropertyChangedSignal("Visible"):Connect(function()
+trackConnection(Main:GetPropertyChangedSignal("Visible"):Connect(function()
+    if not CleanupRegistry.loaded then return end
     if not Main.Visible then
         guiVisible = false
         setMouseFree(false)
     end
-end)
+end))
 
-
---======================================================
 -- Unload
---======================================================
-
--- UNLOAD: tears down everything cleanly so the script can be re-executed
--- without leftover connections or drawings.
 local function unloadScript()
-    -- 1. Prevent new connections from being tracked
     CleanupRegistry.loaded = false
-
-    -- 2. Disconnect all tracked RenderStepped/Heartbeat/InputBegan connections
-    for _, conn in ipairs(CleanupRegistry.connections) do
-        pcall(function() conn:Disconnect() end)
-    end
+    for _, conn in ipairs(CleanupRegistry.connections) do pcall(function() conn:Disconnect() end) end
     CleanupRegistry.connections = {}
-
-    -- 3. Unbind all tracked BindToRenderStep names
-    for _, name in ipairs(CleanupRegistry.renderStepBinds) do
-        pcall(function() RunService:UnbindFromRenderStep(name) end)
-    end
+    for _, name in ipairs(CleanupRegistry.renderStepBinds) do pcall(function() RunService:UnbindFromRenderStep(name) end) end
     CleanupRegistry.renderStepBinds = {}
-
-    -- 4. Disable features that modify the game world (restore original state)
     pcall(function() setFullbright(false) end)
     pcall(function() setNoFog(false) end)
     pcall(function() setNoRain(false) end)
-    pcall(function()
-        if norainConnection then norainConnection:Disconnect() norainConnection = nil end
-    end)
+    pcall(function() if norainConnection then norainConnection:Disconnect() norainConnection = nil end end)
     pcall(function() setRadar(false) end)
     pcall(function() setMinimap(false) end)
-
-    -- 5. Clear all ESP drawings (boxes, names, tracers, skeletons)
-    for _, tbl in pairs(Entries) do
-        pcall(function() disableAll(tbl) end)
-    end
-    -- 6. Clear the aimbot FOV circle
+    for _, tbl in pairs(Entries) do pcall(function() disableAll(tbl) end) end
     pcall(function() AimbotFOV:Remove() end)
-    -- 7. Clear radar dots
     pcall(function() clearRadarDots() end)
-    -- 8. Clear minimap dots
     pcall(function() clearMiniDots() end)
-
-    -- 9. Restore the mouse
     pcall(function()
         UserInputService.MouseBehavior = Enum.MouseBehavior.Default
         UserInputService.MouseIconEnabled = true
     end)
-
-    -- 10. Destroy all tracked GUIs (ScreenGui, MinimapGui)
-    for _, gui in ipairs(CleanupRegistry.guis) do
-        pcall(function() gui:Destroy() end)
-    end
+    for _, gui in ipairs(CleanupRegistry.guis) do pcall(function() gui:Destroy() end) end
     CleanupRegistry.guis = {}
-
-    print(("[ESP+Aimbot] Unloaded v%s"):format(VERSION))
+    print(("[ESP+Aimbot] Descarregado v%s"):format(VERSION))
+    if getgenv then getgenv().ESP_SCRIPT_LOADED = false end
 end
 
---======================================================
--- Add Unload button to the Config column
---======================================================
-addSection(ConfigScroll, "SCRIPT CONTROL", THEME.palette.primaryGreen)
-
-makeButton(ConfigScroll, "Unload Script", function()
-    showPopup("Unload Script",
-        "Unload the script completely?\nAll ESP, aimbot, and GUI will be removed.\nYou'll need to re-execute the script to use it again.",
-        function()
-            pcall(unloadScript)
-        end, { yesText = "Unload", noText = "Cancel" })
+addSection(ConfigScroll, "CONTROLE DO SCRIPT", THEME.palette.primaryGreen)
+makeButton(ConfigScroll, "Descarregar Script", function()
+    showPopup("Descarregar Script", "Descarregar o script completamente?\nTodo ESP, aimbot e GUI serao removidos.\nVoce precisara re-executar o script para usar novamente.", function()
+        pcall(unloadScript)
+    end, { yesText = "Descarregar", noText = "Cancelar" })
 end, true)
