@@ -61,6 +61,7 @@ local Config = {
         Fullbright=false, FullbrightStrength=0.5, NoFog=false, NoRain=false,
         Radar=false, Minimap=false, MinimapSize=200, MinimapZoom=0.5,
         MinimapOpacity=0.85, MinimapFollow=true,
+        KillerESP=false, DeathWaypoint=false,
     },
     TextSize=13,
 }
@@ -121,6 +122,161 @@ do
     task.spawn(function()
         while true do refreshSquadNames() task.wait(5) end
     end)
+end
+
+-- Death tracking: identifica quem matou o jogador local e cria waypoint no local da morte
+-- Baseado no DeathController: LocalPlayer:GetAttribute("DeathFlowState") e "DeathSummaryKiller"
+local DeathState = {
+    killerName = nil,        -- nome do jogador que matou (ou nil se ambiente)
+    deathPosition = nil,     -- Vector3 onde o jogador morreu
+    waypointPart = nil,      -- Part do waypoint 3D
+    waypointGui = nil,       -- BillboardGui do waypoint
+    waypointConn = nil,      -- conexao do loop de atualizacao
+}
+local KILLER_COLOR = Color3.fromRGB(139, 90, 43)  -- marrom para destaque do assassino
+
+local function isKiller(playerModel)
+    if not DeathState.killerName then return false end
+    -- Compara por nome (DeathSummaryKiller usa DisplayName ou Name)
+    if playerModel.Name == DeathState.killerName then return true end
+    -- Tentar comparar com DisplayName do jogador real
+    for _, pl in ipairs(Players:GetPlayers()) do
+        if (pl.Name == DeathState.killerName or pl.DisplayName == DeathState.killerName)
+            and pl.Character == playerModel then
+            return true
+        end
+    end
+    return false
+end
+
+local function destroyWaypoint()
+    if DeathState.waypointConn then DeathState.waypointConn:Disconnect() DeathState.waypointConn = nil end
+    if DeathState.waypointGui then DeathState.waypointGui:Destroy() DeathState.waypointGui = nil end
+    if DeathState.waypointPart then DeathState.waypointPart:Destroy() DeathState.waypointPart = nil end
+end
+
+local function createWaypoint(position)
+    destroyWaypoint()
+    if not Config.Misc.DeathWaypoint then return end
+    local part = Instance.new("Part")
+    part.Name = "IL_DeathWaypoint"
+    part.Anchored = true
+    part.CanCollide = false
+    part.CanTouch = false
+    part.CanQuery = false
+    part.CastShadow = false
+    part.Transparency = 1
+    part.Size = Vector3.new(1, 1, 1)
+    part.Position = position
+    part.Parent = workspace
+
+    local gui = Instance.new("BillboardGui")
+    gui.Name = "DeathWaypoint"
+    gui.AlwaysOnTop = true
+    gui.LightInfluence = 0
+    -- Tamanho reduzido (um pouco menor que o ESP que usa Size=13 + outline)
+    gui.Size = UDim2.fromOffset(140, 50)
+    gui.StudsOffsetWorldSpace = Vector3.new(0, 3, 0)
+    gui.Adornee = part
+    gui.Parent = part
+
+    local skull = Instance.new("TextLabel")
+    skull.BackgroundTransparency = 1
+    skull.Position = UDim2.fromScale(0.5, 0)
+    skull.Size = UDim2.fromOffset(22, 22)
+    skull.AnchorPoint = Vector2.new(0.5, 0)
+    skull.Font = Enum.Font.GothamBold
+    skull.Text = "☠"
+    skull.TextColor3 = KILLER_COLOR
+    skull.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+    skull.TextStrokeTransparency = 0.1
+    skull.TextScaled = true
+    skull.Parent = gui
+
+    local label = Instance.new("TextLabel")
+    label.BackgroundTransparency = 1
+    label.Position = UDim2.fromScale(0.5, 0.5)
+    label.Size = UDim2.fromScale(1, 0.3)
+    label.AnchorPoint = Vector2.new(0.5, 0)
+    label.Font = Enum.Font.GothamBold
+    label.Text = "LOCAL DA MORTE"
+    label.TextColor3 = KILLER_COLOR
+    label.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+    label.TextStrokeTransparency = 0.1
+    -- TextSize fixo menor que ESP (ESP=13, waypoint=10)
+    label.TextSize = 10
+    label.Parent = gui
+
+    local distLabel = Instance.new("TextLabel")
+    distLabel.BackgroundTransparency = 1
+    distLabel.Position = UDim2.fromScale(0.5, 0.78)
+    distLabel.Size = UDim2.fromScale(1, 0.22)
+    distLabel.AnchorPoint = Vector2.new(0.5, 0)
+    distLabel.Font = Enum.Font.GothamSemibold
+    distLabel.Text = ""
+    distLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    distLabel.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+    distLabel.TextStrokeTransparency = 0.1
+    distLabel.TextSize = 10
+    distLabel.Parent = gui
+
+    DeathState.waypointPart = part
+    DeathState.waypointGui = gui
+    DeathState.waypointConn = RunService.RenderStepped:Connect(function()
+        if not DeathState.waypointPart or not DeathState.waypointPart.Parent then return end
+        local char = LocalPlayer.Character
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        if not hrp then return end
+        local dist = (hrp.Position - position).Magnitude
+        local meters = math.max(0, math.floor(dist * StudsToMeters + 0.5))
+        distLabel.Text = string.format("%dm", meters)
+        -- Some quando chegar perto (< 30 studs)
+        if dist < 30 then
+            destroyWaypoint()
+        end
+    end)
+end
+
+do
+    -- Hook no atributo DeathFlowState do LocalPlayer
+    -- As conexoes sao guardadas no DeathState para limpeza no unload
+    DeathState.conns = {}
+    local function handleDeathFlow()
+        local state = LocalPlayer:GetAttribute("DeathFlowState")
+        if state == "active" then
+            -- Jogador morreu: registrar posicao e killer
+            local char = LocalPlayer.Character
+            local hrp = char and char:FindFirstChild("HumanoidRootPart")
+            if hrp then DeathState.deathPosition = hrp.Position end
+            local killer = LocalPlayer:GetAttribute("DeathSummaryKiller")
+            if typeof(killer) == "string" and killer ~= "" and killer ~= "THE ENVIRONMENT" then
+                DeathState.killerName = killer
+            else
+                DeathState.killerName = nil
+            end
+        elseif state == "alive" then
+            -- Respawnou: criar waypoint se tiver posicao registrada
+            if DeathState.deathPosition then
+                task.spawn(function()
+                    task.wait(0.5)  -- espera character estabilizar
+                    createWaypoint(DeathState.deathPosition)
+                end)
+            end
+        elseif state == "menu" then
+            -- Voltou pro menu: limpar tudo
+            destroyWaypoint()
+            DeathState.killerName = nil
+            DeathState.deathPosition = nil
+        end
+    end
+    table.insert(DeathState.conns, LocalPlayer:GetAttributeChangedSignal("DeathFlowState"):Connect(handleDeathFlow))
+    -- Tambem ouvir DeathSummaryVersion para pegar o killer atualizado
+    table.insert(DeathState.conns, LocalPlayer:GetAttributeChangedSignal("DeathSummaryVersion"):Connect(function()
+        local killer = LocalPlayer:GetAttribute("DeathSummaryKiller")
+        if typeof(killer) == "string" and killer ~= "" and killer ~= "THE ENVIRONMENT" then
+            DeathState.killerName = killer
+        end
+    end))
 end
 
 -- Cleanup registry
@@ -333,6 +489,7 @@ local function updatePlayers()
                 hideAll(e)
             else
                 local ally, allyColor = isAlly(m)
+                local killer = Config.Misc.KillerESP and isKiller(m)
                 local cfg = Config.Players
                 local label = m.Name
                 if ally then
@@ -343,6 +500,14 @@ local function updatePlayers()
                         Color=allyColor or Config.Squad.AllyColor,
                     }
                     label = "[ALIADO] " .. m.Name
+                elseif killer then
+                    cfg = {
+                        Enabled=Config.Players.Enabled, Name=Config.Players.Name, Distance=Config.Players.Distance,
+                        Box=Config.Players.Box, Tracer=Config.Players.Tracer, Health=Config.Players.Health,
+                        Skeleton=Config.Players.Skeleton, MaxDistance=Config.Players.MaxDistance,
+                        Color=KILLER_COLOR,
+                    }
+                    label = "[MATOU VC] " .. m.Name
                 end
                 local health = hum and hum.Health or nil
                 renderEntry(e, m, cfg, label, health)
@@ -1454,6 +1619,48 @@ local popupNoCorner = Instance.new("UICorner")
 popupNoCorner.CornerRadius = UDim.new(0, 1)
 popupNoCorner.Parent = PopupNoBtn
 
+-- Checkbox "Nao mostrar novamente" no popup (visivel apenas quando solicitado)
+local PopupChk = { row = nil, box = nil, label = nil, state = false }
+
+PopupChk.row = Instance.new("Frame")
+PopupChk.row.Size = UDim2.new(1, 0, 0, 28)
+PopupChk.row.BackgroundTransparency = 1
+PopupChk.row.LayoutOrder = 5
+PopupChk.row.Visible = false
+PopupChk.row.Parent = PopupBox
+
+PopupChk.box = Instance.new("TextButton")
+PopupChk.box.Size = UDim2.fromOffset(20, 20)
+PopupChk.box.Position = UDim2.fromOffset(0, 4)
+PopupChk.box.BackgroundColor3 = THEME.palette.tabInactive
+PopupChk.box.BackgroundTransparency = 0.06
+PopupChk.box.BorderSizePixel = 0
+PopupChk.box.AutoButtonColor = false
+PopupChk.box.Text = ""
+PopupChk.box.FontFace = THEME.font.bold
+PopupChk.box.TextSize = 14
+PopupChk.box.TextColor3 = THEME.palette.primaryGreen
+PopupChk.box.Parent = PopupChk.row
+local _pcc = Instance.new("UICorner") _pcc.CornerRadius = UDim.new(0, 1) _pcc.Parent = PopupChk.box
+local _pcs = Instance.new("UIStroke") _pcs.Color = THEME.palette.primaryGray _pcs.Thickness = 1 _pcs.Transparency = 0.72 _pcs.Parent = PopupChk.box
+
+PopupChk.label = Instance.new("TextLabel")
+PopupChk.label.Size = UDim2.new(1, -28, 1, 0)
+PopupChk.label.Position = UDim2.fromOffset(28, 0)
+PopupChk.label.BackgroundTransparency = 1
+PopupChk.label.Text = "Nao mostrar novamente"
+PopupChk.label.TextColor3 = THEME.palette.text
+PopupChk.label.FontFace = THEME.font.regular
+PopupChk.label.TextSize = 13
+PopupChk.label.TextXAlignment = Enum.TextXAlignment.Left
+PopupChk.label.Parent = PopupChk.row
+
+PopupChk.box.MouseButton1Click:Connect(function()
+    PopupChk.state = not PopupChk.state
+    PopupChk.box.Text = PopupChk.state and "X" or ""
+    PopupChk.box.BackgroundColor3 = PopupChk.state and THEME.palette.primaryGreen or THEME.palette.tabInactive
+end)
+
 local popupConns = { yes = nil, no = nil }
 local function showPopup(title, message, onYes, opts)
     opts = opts or {}
@@ -1463,13 +1670,18 @@ local function showPopup(title, message, onYes, opts)
     PopupInput.Text = opts.defaultInput or ""
     PopupYesBtn.Text = opts.yesText or "Sim"
     PopupNoBtn.Text = opts.noText or "Nao"
+    -- Checkbox "Nao mostrar novamente"
+    PopupChk.row.Visible = opts.showCheckbox or false
+    PopupChk.state = opts.checkboxDefault or false
+    PopupChk.box.Text = PopupChk.state and "X" or ""
+    PopupChk.box.BackgroundColor3 = PopupChk.state and THEME.palette.primaryGreen or THEME.palette.tabInactive
     PopupOverlay.Visible = true
     if opts.showInput then PopupInput:CaptureFocus() end
     if popupConns.yes then popupConns.yes:Disconnect() popupConns.yes = nil end
     if popupConns.no then popupConns.no:Disconnect() popupConns.no = nil end
     popupConns.yes = PopupYesBtn.MouseButton1Click:Connect(function()
         PopupOverlay.Visible = false
-        if onYes then onYes(PopupInput.Text) end
+        if onYes then onYes(PopupInput.Text, PopupChk.state) end
     end)
     popupConns.no = PopupNoBtn.MouseButton1Click:Connect(function()
         PopupOverlay.Visible = false
@@ -1788,6 +2000,47 @@ makeButton(MiscScroll, "Trocar Servidor", function()
     end)
 end, true)
 
+-- Resetar Personagem: mata o personagem local para forçar respawn
+-- A preferencia "nao mostrar novamente" e persistida em arquivo (readFile/writeFile definidos abaixo)
+local ResetChar = { skipConfirm = nil }
+
+function ResetChar.doReset()
+    pcall(function()
+        local char = LocalPlayer.Character
+        if not char then return end
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hum then hum.Health = 0 end
+        if char and hum and hum.Health > 0 then
+            char:BreakJoints()
+        end
+    end)
+end
+
+makeButton(MiscScroll, "Resetar Personagem", function()
+    -- Carrega preferencia sob demanda
+    if ResetChar.skipConfirm == nil then
+        pcall(function()
+            local content = readFile and readFile("bagabo/reset_pref.txt")
+            ResetChar.skipConfirm = (content == "1")
+        end)
+        if ResetChar.skipConfirm == nil then ResetChar.skipConfirm = false end
+    end
+    if ResetChar.skipConfirm then
+        ResetChar.doReset()
+        return
+    end
+    showPopup("Resetar Personagem",
+        "Tem certeza que deseja resetar seu personagem?\nVoce morrera e respawna automaticamente.",
+        function(_, dontShowAgain)
+            if dontShowAgain then
+                ResetChar.skipConfirm = true
+                pcall(function() if writefile then writefile("bagabo/reset_pref.txt", "1") end end)
+            end
+            ResetChar.doReset()
+        end,
+        { yesText = "Resetar", noText = "Cancelar", showCheckbox = true })
+end, true)
+
 -- Radar ESP
 local mapConfig = nil
 pcall(function() mapConfig = require(game:GetService("ReplicatedStorage").Shared.common.config.mapConfig) end)
@@ -1875,7 +2128,10 @@ local function updateRadar()
                     local y = math.clamp((hrp.Position.Z - bounds.minZ) / bounds.spanZ, 0, 1)
                     entry.Dot.Position = UDim2.fromScale(x, y)
                     local ally, allyColor = isAlly(m)
-                    if ally then
+                    local killer = Config.Misc.KillerESP and isKiller(m)
+                    if killer then
+                        entry.Dot.BackgroundColor3 = KILLER_COLOR
+                    elseif ally then
                         entry.Dot.BackgroundColor3 = allyColor or Config.Squad.AllyColor
                     else
                         entry.Dot.BackgroundColor3 = Color3.fromRGB(255, 80, 80)
@@ -2136,7 +2392,10 @@ local function updateMinimap()
                         else
                             entry.Dot.Position = UDim2.fromScale(dotLocalX, dotLocalY)
                             local ally, allyColor = isAlly(m)
-                            if ally then
+                            local killer = Config.Misc.KillerESP and isKiller(m)
+                            if killer then
+                                entry.Dot.BackgroundColor3 = KILLER_COLOR
+                            elseif ally then
                                 entry.Dot.BackgroundColor3 = allyColor or Config.Squad.AllyColor
                             else
                                 entry.Dot.BackgroundColor3 = Color3.fromRGB(255, 80, 80)
@@ -2167,6 +2426,15 @@ local function setMinimap(enabled)
         destroyMinimap()
     end
 end
+
+addSection(MiscScroll, "MORTE", THEME.palette.primaryGreen)
+makeToggle(MiscScroll, "Destacar Assassino", Config.Misc.KillerESP, function(v)
+    Config.Misc.KillerESP = v
+end)
+makeToggle(MiscScroll, "Waypoint da Morte", Config.Misc.DeathWaypoint, function(v)
+    Config.Misc.DeathWaypoint = v
+    if not v then destroyWaypoint() end
+end)
 
 addSection(MiscScroll, "MINIMAPA", THEME.palette.primaryGreen)
 makeToggle(MiscScroll, "Minimapa", Config.Misc.Minimap, function(v) Config.Misc.Minimap = v setMinimap(v) end)
@@ -2210,6 +2478,7 @@ local function captureConfig()
         NoFog = Config.Misc.NoFog, NoRain = Config.Misc.NoRain, Radar = Config.Misc.Radar,
         Minimap = Config.Misc.Minimap, MinimapSize = Config.Misc.MinimapSize, MinimapZoom = Config.Misc.MinimapZoom,
         MinimapOpacity = Config.Misc.MinimapOpacity, MinimapFollow = Config.Misc.MinimapFollow,
+        KillerESP = Config.Misc.KillerESP, DeathWaypoint = Config.Misc.DeathWaypoint,
     }
     return snap
 end
@@ -2265,6 +2534,8 @@ local function applyConfig(snap)
     table.insert(expected, {type="bool", val=Config.Misc.NoFog})
     table.insert(expected, {type="bool", val=Config.Misc.NoRain})
     table.insert(expected, {type="bool", val=Config.Misc.Radar})
+    table.insert(expected, {type="bool", val=Config.Misc.KillerESP})
+    table.insert(expected, {type="bool", val=Config.Misc.DeathWaypoint})
     table.insert(expected, {type="bool", val=Config.Misc.Minimap})
     table.insert(expected, {type="bool", val=Config.Misc.MinimapFollow})
     table.insert(expected, {type="num", val=Config.Misc.MinimapSize})
@@ -2303,15 +2574,13 @@ local function listConfigs()
     return names
 end
 
-local selectedConfigName = nil
-local ConfigListScroll = nil
-local ConfigListItems = {}
+local CfgList = { selected = nil, scroll = nil, items = {}, drawerOpen = false }
 
 local function refreshConfigList()
-    if not ConfigListScroll then return end
+    if not CfgList.scroll then return end
     pcall(function() if drawerCount then drawerCount.Text = tostring(#listConfigs()) end end)
-    for _, item in pairs(ConfigListItems) do if item and item.Parent then item:Destroy() end end
-    ConfigListItems = {}
+    for _, item in pairs(CfgList.items) do if item and item.Parent then item:Destroy() end end
+    CfgList.items = {}
     local names = listConfigs()
     if #names == 0 then
         local empty = Instance.new("TextLabel")
@@ -2322,28 +2591,28 @@ local function refreshConfigList()
         empty.FontFace = THEME.font.regular
         empty.TextSize = 12
         empty.TextXAlignment = Enum.TextXAlignment.Center
-        empty.Parent = ConfigListScroll
-        ConfigListItems["_empty"] = empty
+        empty.Parent = CfgList.scroll
+        CfgList.items["_empty"] = empty
         return
     end
     for _, name in ipairs(names) do
         local btn = Instance.new("TextButton")
         btn.Size = UDim2.new(1, 0, 0, 32)
-        btn.BackgroundColor3 = (name == selectedConfigName) and THEME.palette.primaryGreen or THEME.palette.tabInactive
+        btn.BackgroundColor3 = (name == CfgList.selected) and THEME.palette.primaryGreen or THEME.palette.tabInactive
         btn.BackgroundTransparency = 0.06
         btn.BorderSizePixel = 0
         btn.AutoButtonColor = false
         btn.Text = name
         btn.FontFace = THEME.font.semiBold
         btn.TextSize = 13
-        btn.TextColor3 = (name == selectedConfigName) and THEME.palette.backgroundGray or THEME.palette.primaryGray
+        btn.TextColor3 = (name == CfgList.selected) and THEME.palette.backgroundGray or THEME.palette.primaryGray
         btn.TextXAlignment = Enum.TextXAlignment.Left
         local btnPad = Instance.new("UIPadding") btnPad.PaddingLeft = UDim.new(0, 10) btnPad.Parent = btn
         local btnCorner = Instance.new("UICorner") btnCorner.CornerRadius = UDim.new(0, 1) btnCorner.Parent = btn
         if fileExists(CONFIG_FOLDER .. "/" .. name .. ".autoload") then btn.Text = "* " .. name end
-        btn.Parent = ConfigListScroll
-        btn.MouseButton1Click:Connect(function() selectedConfigName = name refreshConfigList() end)
-        ConfigListItems[name] = btn
+        btn.Parent = CfgList.scroll
+        btn.MouseButton1Click:Connect(function() CfgList.selected = name refreshConfigList() end)
+        CfgList.items[name] = btn
     end
 end
 
@@ -2399,32 +2668,31 @@ local dcCorner = Instance.new("UICorner") dcCorner.CornerRadius = UDim.new(1, 0)
 drawerHeader.MouseEnter:Connect(function() dhStroke.Transparency = 0.4 end)
 drawerHeader.MouseLeave:Connect(function() dhStroke.Transparency = 0.72 end)
 
-local drawerOpen = false
 local function updateDrawerCount() drawerCount.Text = tostring(#listConfigs()) end
 updateDrawerCount()
 
-ConfigListScroll = Instance.new("ScrollingFrame")
-ConfigListScroll.Size = UDim2.new(1, 0, 0, 140)
-ConfigListScroll.BackgroundColor3 = THEME.palette.tabInactive
-ConfigListScroll.BackgroundTransparency = 0.5
-ConfigListScroll.BorderSizePixel = 0
-ConfigListScroll.ScrollBarThickness = 4
-ConfigListScroll.ScrollBarImageColor3 = THEME.palette.primaryGray
-ConfigListScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-ConfigListScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-ConfigListScroll.LayoutOrder = nextOrder()
-ConfigListScroll.Visible = false
-ConfigListScroll.Parent = ConfigScroll
-local clsCorner = Instance.new("UICorner") clsCorner.CornerRadius = UDim.new(0, 1) clsCorner.Parent = ConfigListScroll
-local clsPadding = Instance.new("UIPadding") clsPadding.PaddingTop = UDim.new(0, 6) clsPadding.PaddingBottom = UDim.new(0, 6) clsPadding.PaddingLeft = UDim.new(0, 6) clsPadding.PaddingRight = UDim.new(0, 6) clsPadding.Parent = ConfigListScroll
-local ConfigListLayout = Instance.new("UIListLayout") ConfigListLayout.Padding = UDim.new(0, 4) ConfigListLayout.SortOrder = Enum.SortOrder.LayoutOrder ConfigListLayout.Parent = ConfigListScroll
+CfgList.scroll = Instance.new("ScrollingFrame")
+CfgList.scroll.Size = UDim2.new(1, 0, 0, 140)
+CfgList.scroll.BackgroundColor3 = THEME.palette.tabInactive
+CfgList.scroll.BackgroundTransparency = 0.5
+CfgList.scroll.BorderSizePixel = 0
+CfgList.scroll.ScrollBarThickness = 4
+CfgList.scroll.ScrollBarImageColor3 = THEME.palette.primaryGray
+CfgList.scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+CfgList.scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+CfgList.scroll.LayoutOrder = nextOrder()
+CfgList.scroll.Visible = false
+CfgList.scroll.Parent = ConfigScroll
+local clsCorner = Instance.new("UICorner") clsCorner.CornerRadius = UDim.new(0, 1) clsCorner.Parent = CfgList.scroll
+local clsPadding = Instance.new("UIPadding") clsPadding.PaddingTop = UDim.new(0, 6) clsPadding.PaddingBottom = UDim.new(0, 6) clsPadding.PaddingLeft = UDim.new(0, 6) clsPadding.PaddingRight = UDim.new(0, 6) clsPadding.Parent = CfgList.scroll
+local ConfigListLayout = Instance.new("UIListLayout") ConfigListLayout.Padding = UDim.new(0, 4) ConfigListLayout.SortOrder = Enum.SortOrder.LayoutOrder ConfigListLayout.Parent = CfgList.scroll
 
 drawerHeader.MouseButton1Click:Connect(function()
-    drawerOpen = not drawerOpen
-    ConfigListScroll.Visible = drawerOpen
-    drawerArrow.Text = drawerOpen and "v" or ">"
-    drawerLabel.Text = drawerOpen and "Esconder configs" or "Mostrar configs"
-    if drawerOpen then refreshConfigList() end
+    CfgList.drawerOpen = not CfgList.drawerOpen
+    CfgList.scroll.Visible = CfgList.drawerOpen
+    drawerArrow.Text = CfgList.drawerOpen and "v" or ">"
+    drawerLabel.Text = CfgList.drawerOpen and "Esconder configs" or "Mostrar configs"
+    if CfgList.drawerOpen then refreshConfigList() end
     updateDrawerCount()
 end)
 refreshConfigList()
@@ -2439,23 +2707,23 @@ makeButton(ConfigScroll, "Salvar (novo)", function()
         if fileExists(path) then return end
         ensureConfigFolder()
         writeFile(path, serializeConfig(captureConfig()))
-        selectedConfigName = name
+        CfgList.selected = name
         refreshConfigList()
     end, { showInput = true, yesText = "Salvar", noText = "Cancelar" })
 end)
 makeButton(ConfigScroll, "Sobrescrever", function()
-    if not selectedConfigName then showPopup("Sobrescrever", "Selecione uma config primeiro.", nil, { yesText = "OK", noText = "OK" }) return end
-    showPopup("Sobrescrever Config", "Sobrescrever '" .. selectedConfigName .. "' com as configuracoes atuais?", function()
-        local path = CONFIG_FOLDER .. "/" .. selectedConfigName .. ".json"
+    if not CfgList.selected then showPopup("Sobrescrever", "Selecione uma config primeiro.", nil, { yesText = "OK", noText = "OK" }) return end
+    showPopup("Sobrescrever Config", "Sobrescrever '" .. CfgList.selected .. "' com as configuracoes atuais?", function()
+        local path = CONFIG_FOLDER .. "/" .. CfgList.selected .. ".json"
         ensureConfigFolder()
         writeFile(path, serializeConfig(captureConfig()))
         refreshConfigList()
     end)
 end, true)
 makeButton(ConfigScroll, "Carregar", function()
-    if not selectedConfigName then showPopup("Carregar", "Selecione uma config primeiro.", nil, { yesText = "OK", noText = "OK" }) return end
-    showPopup("Carregar Config", "Carregar '" .. selectedConfigName .. "'?\nIsso substituira suas configuracoes atuais.", function()
-        local path = CONFIG_FOLDER .. "/" .. selectedConfigName .. ".json"
+    if not CfgList.selected then showPopup("Carregar", "Selecione uma config primeiro.", nil, { yesText = "OK", noText = "OK" }) return end
+    showPopup("Carregar Config", "Carregar '" .. CfgList.selected .. "'?\nIsso substituira suas configuracoes atuais.", function()
+        local path = CONFIG_FOLDER .. "/" .. CfgList.selected .. ".json"
         local json = readFile(path)
         if not json then return end
         local snap = deserializeConfig(json)
@@ -2465,12 +2733,12 @@ end)
 
 addSection(ConfigScroll, "AUTOLOAD", THEME.palette.primaryGreen)
 makeButton(ConfigScroll, "Definir Autoload", function()
-    if not selectedConfigName then showPopup("Autoload", "Selecione uma config primeiro.", nil, { yesText = "OK", noText = "OK" }) return end
+    if not CfgList.selected then showPopup("Autoload", "Selecione uma config primeiro.", nil, { yesText = "OK", noText = "OK" }) return end
     local names = listConfigs()
     for _, n in ipairs(names) do deleteFile(CONFIG_FOLDER .. "/" .. n .. ".autoload") end
-    writeFile(CONFIG_FOLDER .. "/" .. selectedConfigName .. ".autoload", "1")
+    writeFile(CONFIG_FOLDER .. "/" .. CfgList.selected .. ".autoload", "1")
     refreshConfigList()
-    showPopup("Autoload Definido", "'" .. selectedConfigName .. "' sera carregado automaticamente quando o script iniciar.", nil, { yesText = "OK", noText = "Fechar" })
+    showPopup("Autoload Definido", "'" .. CfgList.selected .. "' sera carregado automaticamente quando o script iniciar.", nil, { yesText = "OK", noText = "Fechar" })
 end)
 makeButton(ConfigScroll, "Resetar Autoload", function()
     local hasAutoload = false
@@ -2486,12 +2754,12 @@ makeButton(ConfigScroll, "Resetar Autoload", function()
     end, { yesText = "Resetar", noText = "Cancelar" })
 end, true)
 makeButton(ConfigScroll, "Deletar", function()
-    if not selectedConfigName then showPopup("Deletar", "Selecione uma config primeiro.", nil, { yesText = "OK", noText = "OK" }) return end
-    showPopup("Deletar Config", "Tem certeza que deseja deletar '" .. selectedConfigName .. "'?\nIsso nao pode ser desfeito.", function()
-        local path = CONFIG_FOLDER .. "/" .. selectedConfigName .. ".json"
+    if not CfgList.selected then showPopup("Deletar", "Selecione uma config primeiro.", nil, { yesText = "OK", noText = "OK" }) return end
+    showPopup("Deletar Config", "Tem certeza que deseja deletar '" .. CfgList.selected .. "'?\nIsso nao pode ser desfeito.", function()
+        local path = CONFIG_FOLDER .. "/" .. CfgList.selected .. ".json"
         deleteFile(path)
-        deleteFile(CONFIG_FOLDER .. "/" .. selectedConfigName .. ".autoload")
-        selectedConfigName = nil
+        deleteFile(CONFIG_FOLDER .. "/" .. CfgList.selected .. ".autoload")
+        CfgList.selected = nil
         refreshConfigList()
     end, { yesText = "Deletar", noText = "Cancelar" })
 end, true)
@@ -2564,19 +2832,22 @@ if not isPC then
     AimToggleBtn.TextColor3 = THEME.palette.primaryGreen
     AimToggleBtn.Visible = false
     AimToggleBtn.Parent = FloatBtnsGui
-    local atCorner = Instance.new("UICorner") atCorner.CornerRadius = UDim.new(0, btnRadius) atCorner.Parent = AimToggleBtn
-    local atStroke = Instance.new("UIStroke") atStroke.Color = THEME.palette.primaryGreen atStroke.Thickness = 1 atStroke.Transparency = 0 atStroke.Parent = AimToggleBtn
+    local aimBtnStroke  -- declarado antes para ser visivel em updateAimBtn
+    do
+        local c = Instance.new("UICorner") c.CornerRadius = UDim.new(0, btnRadius) c.Parent = AimToggleBtn
+        aimBtnStroke = Instance.new("UIStroke") aimBtnStroke.Color = THEME.palette.primaryGreen aimBtnStroke.Thickness = 1 aimBtnStroke.Transparency = 0 aimBtnStroke.Parent = AimToggleBtn
+    end
 
     local function updateAimBtn()
         AimToggleBtn.Visible = Config.Aimbot.Enabled
         if aiming then
             AimToggleBtn.TextColor3 = THEME.palette.primaryGreen
-            atStroke.Color = THEME.palette.primaryGreen
-            atStroke.Transparency = 0
+            aimBtnStroke.Color = THEME.palette.primaryGreen
+            aimBtnStroke.Transparency = 0
         else
             AimToggleBtn.TextColor3 = THEME.palette.muted
-            atStroke.Color = THEME.palette.primaryGray
-            atStroke.Transparency = 0.4
+            aimBtnStroke.Color = THEME.palette.primaryGray
+            aimBtnStroke.Transparency = 0.4
         end
     end
 
@@ -2609,12 +2880,12 @@ if not isPC then
             if shouldShowAim then
                 if aiming then
                     AimToggleBtn.TextColor3 = THEME.palette.primaryGreen
-                    atStroke.Color = THEME.palette.primaryGreen
-                    atStroke.Transparency = 0
+                    aimBtnStroke.Color = THEME.palette.primaryGreen
+                    aimBtnStroke.Transparency = 0
                 else
                     AimToggleBtn.TextColor3 = THEME.palette.muted
-                    atStroke.Color = THEME.palette.primaryGray
-                    atStroke.Transparency = 0.4
+                    aimBtnStroke.Color = THEME.palette.primaryGray
+                    aimBtnStroke.Transparency = 0.4
                 end
             end
         end
@@ -2689,6 +2960,16 @@ local function unloadScript()
     pcall(function() if norainConnection then norainConnection:Disconnect() norainConnection = nil end end)
     pcall(function() setRadar(false) end)
     pcall(function() setMinimap(false) end)
+    -- Limpar death tracking
+    pcall(function()
+        destroyWaypoint()
+        if DeathState.conns then
+            for _, c in ipairs(DeathState.conns) do c:Disconnect() end
+            DeathState.conns = nil
+        end
+        DeathState.killerName = nil
+        DeathState.deathPosition = nil
+    end)
     for _, tbl in pairs(Entries) do pcall(function() disableAll(tbl) end) end
     pcall(function() AimbotFOV:Remove() end)
     pcall(function() clearRadarDots() end)
