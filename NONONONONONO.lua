@@ -2000,6 +2000,15 @@ makeButton(MiscScroll, "Trocar Servidor", function()
     end)
 end, true)
 
+-- Sair do Jogo: desconecta do servidor atual usando Player:Kick
+makeButton(MiscScroll, "Sair do Jogo", function()
+    showPopup("Sair do Jogo", "Tem certeza que deseja sair do jogo?\nVoce sera desconectado do servidor atual.",
+        function()
+            pcall(function() LocalPlayer:Kick("Saiu do jogo") end)
+        end,
+        { yesText = "Sair", noText = "Cancelar" })
+end, true)
+
 -- Resetar Personagem: mata o personagem local para forçar respawn
 -- A preferencia "nao mostrar novamente" e persistida em arquivo (readFile/writeFile definidos abaixo)
 local ResetChar = { skipConfirm = nil }
@@ -2851,17 +2860,26 @@ if not isPC then
         end
     end
 
-    local function isInventoryOpen()
+    -- Detecta se algum menu do jogo (inventario, squad) esta aberto
+    -- para esconder os botoes flutuantes e evitar overlap
+    local function isGameMenuOpen()
         local pg = LocalPlayer:FindFirstChild("PlayerGui")
         if not pg then return false end
+        -- Inventario
         local inv = pg:FindFirstChild("InventoryUI")
-        if not inv or not inv:IsA("ScreenGui") then return false end
-        return inv.Enabled
+        if inv and inv:IsA("ScreenGui") and inv.Enabled then return true end
+        -- Squad panel (SquadController.u95 = SquadUI.Panel)
+        local squadGui = pg:FindFirstChild("SquadUI")
+        if squadGui and squadGui:IsA("ScreenGui") then
+            local panel = squadGui:FindFirstChild("Panel")
+            if panel and panel:IsA("Frame") and panel.Visible then return true end
+        end
+        return false
     end
 
     RunService.RenderStepped:Connect(function()
-        local invOpen = isInventoryOpen()
-        if invOpen then
+        local menuOpen = isGameMenuOpen()
+        if menuOpen then
             GuiToggleBtn.Visible = false
             AimToggleBtn.Visible = false
         else
@@ -2938,46 +2956,3 @@ trackConnection(Main:GetPropertyChangedSignal("Visible"):Connect(function()
     end
 end))
 
--- Unload
-local function unloadScript()
-    CleanupRegistry.loaded = false
-    for _, conn in ipairs(CleanupRegistry.connections) do pcall(function() conn:Disconnect() end) end
-    CleanupRegistry.connections = {}
-    for _, name in ipairs(CleanupRegistry.renderStepBinds) do pcall(function() RunService:UnbindFromRenderStep(name) end) end
-    CleanupRegistry.renderStepBinds = {}
-    pcall(function() setFullbright(false) end)
-    pcall(function() setNoFog(false) end)
-    pcall(function() setNoRain(false) end)
-    pcall(function() if norainConnection then norainConnection:Disconnect() norainConnection = nil end end)
-    pcall(function() setRadar(false) end)
-    pcall(function() setMinimap(false) end)
-    -- Limpar death tracking
-    pcall(function()
-        destroyWaypoint()
-        if DeathState.conns then
-            for _, c in ipairs(DeathState.conns) do c:Disconnect() end
-            DeathState.conns = nil
-        end
-        DeathState.killerName = nil
-        DeathState.deathPosition = nil
-    end)
-    for _, tbl in pairs(Entries) do pcall(function() disableAll(tbl) end) end
-    pcall(function() AimbotFOV:Remove() end)
-    pcall(function() clearRadarDots() end)
-    pcall(function() clearMiniDots() end)
-    pcall(function()
-        UserInputService.MouseBehavior = Enum.MouseBehavior.Default
-        UserInputService.MouseIconEnabled = true
-    end)
-    for _, gui in ipairs(CleanupRegistry.guis) do pcall(function() gui:Destroy() end) end
-    CleanupRegistry.guis = {}
-    print(("[ESP+Aimbot] Descarregado v%s"):format(VERSION))
-    if getgenv then getgenv().ESP_SCRIPT_LOADED = false end
-end
-
-addSection(ConfigScroll, "CONTROLE DO SCRIPT", THEME.palette.primaryGreen)
-makeButton(ConfigScroll, "Descarregar Script", function()
-    showPopup("Descarregar Script", "Descarregar o script completamente?\nTodo ESP, aimbot e GUI serao removidos.\nVoce precisara re-executar o script para usar novamente.", function()
-        pcall(unloadScript)
-    end, { yesText = "Descarregar", noText = "Cancelar" })
-end, true)
