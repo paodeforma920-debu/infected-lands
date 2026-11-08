@@ -2956,48 +2956,68 @@ trackConnection(Main:GetPropertyChangedSignal("Visible"):Connect(function()
     end
 end))
 
--- Unload
+-- Unload (stealth: silencioso para nao disparar AC)
+-- Estrategia: apenas parar de fazer coisas, nao restaurar Lighting explicitamente
+-- (o jogo vai retomar seu ciclo naturalmente). Sem prints, sem iterar workspace,
+-- sem mexer em UserInputService, sem manipular getgenv.
 local function unloadScript()
     CleanupRegistry.loaded = false
-    -- PRIMEIRO: destruir death tracking e waypoint (BillboardGui AlwaysOnTop pode ser detectado pelo AC)
-    -- Deve ser limpo antes de qualquer outra coisa para nao deixar rastros
+    -- 1. Desconectar todas as conexoes (silencioso, Rapido)
     pcall(function()
-        destroyWaypoint()
+        for _, conn in ipairs(CleanupRegistry.connections) do conn:Disconnect() end
+        CleanupRegistry.connections = {}
+    end)
+    -- 2. Desbindar render steps
+    pcall(function()
+        for _, name in ipairs(CleanupRegistry.renderStepBinds) do RunService:UnbindFromRenderStep(name) end
+        CleanupRegistry.renderStepBinds = {}
+    end)
+    -- 3. Desconectar death tracking (nao destruir waypoint aqui - ver passo 6)
+    pcall(function()
+        if DeathState.waypointConn then DeathState.waypointConn:Disconnect() DeathState.waypointConn = nil end
         if DeathState.conns then
             for _, c in ipairs(DeathState.conns) do c:Disconnect() end
             DeathState.conns = nil
         end
+    end)
+    -- 4. Parar loops de fullbright/nofog/norain (apenas desconectar, NAO restaurar Lighting)
+    -- O jogo vai retomar seu ciclo naturalmente - restaurar manualmente e suspeito
+    pcall(function() if fullbrightConnection then fullbrightConnection:Disconnect() fullbrightConnection = nil end end)
+    pcall(function() if nofogConnection then nofogConnection:Disconnect() nofogConnection = nil end end)
+    pcall(function() RunService:UnbindFromRenderStep("NoFogApply") end)
+    pcall(function() if norainConnection then norainConnection:Disconnect() norainConnection = nil end end)
+    pcall(function() if radarConnection then radarConnection:Disconnect() radarConnection = nil end end)
+    pcall(function() if MinimapConn then MinimapConn:Disconnect() MinimapConn = nil end end)
+    -- 5. Remover Drawing objects (ESP entries, FOV circle) - silencioso
+    pcall(function()
+        for _, tbl in pairs(Entries) do
+            for _, e in pairs(tbl) do pcall(clearEntry, e) end
+        end
+        table.clear(Entries.Players)
+        table.clear(Entries.Corpses)
+        table.clear(Entries.Vehicles)
+        table.clear(Entries.Items)
+    end)
+    pcall(function() AimbotFOV:Remove() end)
+    -- 6. Destruir waypoint e GUIs por ultimo (destruicao direta, sem iterar workspace)
+    pcall(function()
+        if DeathState.waypointGui then DeathState.waypointGui:Destroy() DeathState.waypointGui = nil end
+        if DeathState.waypointPart then DeathState.waypointPart:Destroy() DeathState.waypointPart = nil end
         DeathState.killerName = nil
         DeathState.deathPosition = nil
     end)
-    -- Tambem limpar qualquer waypoint residual no workspace (caso tenha sobrado de sessoes anteriores)
-    pcall(function()
-        for _, obj in ipairs(workspace:GetChildren()) do
-            if obj.Name == "IL_DeathWaypoint" then obj:Destroy() end
-        end
-    end)
-    for _, conn in ipairs(CleanupRegistry.connections) do pcall(function() conn:Disconnect() end) end
-    CleanupRegistry.connections = {}
-    for _, name in ipairs(CleanupRegistry.renderStepBinds) do pcall(function() RunService:UnbindFromRenderStep(name) end) end
-    CleanupRegistry.renderStepBinds = {}
-    pcall(function() setFullbright(false) end)
-    pcall(function() setNoFog(false) end)
-    pcall(function() setNoRain(false) end)
-    pcall(function() if norainConnection then norainConnection:Disconnect() norainConnection = nil end end)
-    pcall(function() setRadar(false) end)
-    pcall(function() setMinimap(false) end)
-    for _, tbl in pairs(Entries) do pcall(function() disableAll(tbl) end) end
-    pcall(function() AimbotFOV:Remove() end)
     pcall(function() clearRadarDots() end)
     pcall(function() clearMiniDots() end)
     pcall(function()
-        UserInputService.MouseBehavior = Enum.MouseBehavior.Default
-        UserInputService.MouseIconEnabled = true
+        for _, gui in ipairs(CleanupRegistry.guis) do gui:Destroy() end
+        CleanupRegistry.guis = {}
     end)
-    for _, gui in ipairs(CleanupRegistry.guis) do pcall(function() gui:Destroy() end) end
-    CleanupRegistry.guis = {}
-    print(("[ESP+Aimbot] Descarregado v%s"):format(VERSION))
-    if getgenv then getgenv().ESP_SCRIPT_LOADED = false end
+    -- NAO fazer nada de suspeito aqui:
+    -- - Sem print (AC pode monitorar console)
+    -- - Sem restaurar Lighting (o jogo retoma naturalmente)
+    -- - Sem mexer em UserInputService
+    -- - Sem iterar workspace
+    -- - Sem manipular getgenv (deixar ESP_SCRIPT_LOADED = true pra evitar re-execucao acidental)
 end
 
 addSection(ConfigScroll, "CONTROLE DO SCRIPT", THEME.palette.primaryGreen)
