@@ -2000,6 +2000,15 @@ makeButton(MiscScroll, "Trocar Servidor", function()
     end)
 end, true)
 
+-- Sair do Jogo: desconecta do servidor atual usando Player:Kick
+makeButton(MiscScroll, "Sair do Jogo", function()
+    showPopup("Sair do Jogo", "Tem certeza que deseja sair do jogo?\nVoce sera desconectado do servidor atual.",
+        function()
+            pcall(function() LocalPlayer:Kick("Saiu do jogo") end)
+        end,
+        { yesText = "Sair", noText = "Cancelar" })
+end, true)
+
 -- Resetar Personagem: mata o personagem local para forçar respawn
 -- A preferencia "nao mostrar novamente" e persistida em arquivo (readFile/writeFile definidos abaixo)
 local ResetChar = { skipConfirm = nil }
@@ -2950,6 +2959,23 @@ end))
 -- Unload
 local function unloadScript()
     CleanupRegistry.loaded = false
+    -- PRIMEIRO: destruir death tracking e waypoint (BillboardGui AlwaysOnTop pode ser detectado pelo AC)
+    -- Deve ser limpo antes de qualquer outra coisa para nao deixar rastros
+    pcall(function()
+        destroyWaypoint()
+        if DeathState.conns then
+            for _, c in ipairs(DeathState.conns) do c:Disconnect() end
+            DeathState.conns = nil
+        end
+        DeathState.killerName = nil
+        DeathState.deathPosition = nil
+    end)
+    -- Tambem limpar qualquer waypoint residual no workspace (caso tenha sobrado de sessoes anteriores)
+    pcall(function()
+        for _, obj in ipairs(workspace:GetChildren()) do
+            if obj.Name == "IL_DeathWaypoint" then obj:Destroy() end
+        end
+    end)
     for _, conn in ipairs(CleanupRegistry.connections) do pcall(function() conn:Disconnect() end) end
     CleanupRegistry.connections = {}
     for _, name in ipairs(CleanupRegistry.renderStepBinds) do pcall(function() RunService:UnbindFromRenderStep(name) end) end
@@ -2960,16 +2986,6 @@ local function unloadScript()
     pcall(function() if norainConnection then norainConnection:Disconnect() norainConnection = nil end end)
     pcall(function() setRadar(false) end)
     pcall(function() setMinimap(false) end)
-    -- Limpar death tracking
-    pcall(function()
-        destroyWaypoint()
-        if DeathState.conns then
-            for _, c in ipairs(DeathState.conns) do c:Disconnect() end
-            DeathState.conns = nil
-        end
-        DeathState.killerName = nil
-        DeathState.deathPosition = nil
-    end)
     for _, tbl in pairs(Entries) do pcall(function() disableAll(tbl) end) end
     pcall(function() AimbotFOV:Remove() end)
     pcall(function() clearRadarDots() end)
